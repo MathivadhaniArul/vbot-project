@@ -1,0 +1,105 @@
+# =========================
+
+# FRONTEND (Next.js)
+
+# =========================
+
+# dependencies
+
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# next.js build
+
+/.next/
+/out/
+
+# production build
+
+/build
+
+# typescript
+
+*.tsbuildinfo
+next-env.d.ts
+
+# testing
+
+/coverage
+
+# =========================
+
+# BACKEND (FastAPI / Python)
+
+# =========================
+
+# python cache
+
+**pycache**/
+*.pyc
+*.pyo
+*.pyd
+
+# virtual environments
+
+venv/
+.venv/
+env/
+
+# environment variables
+
+.env*
+!.env.example
+
+# logs
+
+*.log
+
+# =========================
+
+# VECTOR DB / RAG FILES
+
+# =========================
+
+# chroma vector database (VERY IMPORTANT)
+
+backend/chroma/
+
+# generated json / chunks (optional, if reproducible)
+
+backend/*.json
+
+# =========================
+
+# SYSTEM FILES
+
+# =========================
+
+.DS_Store
+Thumbs.db
+
+# =========================
+
+# DEBUG
+
+# =========================
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# =========================
+
+# DEPLOYMENT
+
+# =========================
+
+.vercel
+*.pem
