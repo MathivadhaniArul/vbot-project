@@ -115,6 +115,27 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 
 ---
 
+## Usage Guide
+
+### Using the Frontend
+1. Open your browser and navigate to `http://localhost:3000`.
+2. **Text Chat:** Type your queries in the chat input at the bottom and press Enter to chat with the RAG-enabled assistant.
+3. **Voice Assistant:** 
+   * Click on the microphone icon to start recording your voice.
+   * Speak your query (the frontend uses **RecordRTC** to capture high-quality audio in WAV format).
+   * Click the stop button to send the voice query. The backend will transcribe it, query the RAG pipeline, and respond.
+
+### Using the Backend
+1. **Interactive API Docs:** Navigate to `http://localhost:8000/docs` in your browser to access the interactive FastAPI Swagger UI. Here you can explore and test all API endpoints manually (e.g., chat endpoints, ingestion endpoints).
+2. **Autonomous RAG Pipeline:** The backend runs a semi-automated RAG background pipeline. It automatically:
+   * Periodically crawls websites (such as the Riviera 2026 event site) using hybrid static/SPA fetchers.
+   * Detects changes using SHA-256 content hashes.
+   * Splits modified content into chunks and generates embeddings.
+   * Ingests the updated knowledge into the **Chroma DB** vector store.
+3. **Data Verification:** You can check the current status of the background jobs and verify database stats via the API endpoints.
+
+---
+
 ## Troubleshooting Notes
 
 * **Port Conflicts:** If ports `3000` or `8000` are already in use, you can specify different ports.
