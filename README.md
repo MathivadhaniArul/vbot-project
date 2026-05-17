@@ -115,19 +115,24 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 
 ---
 
+## Troubleshooting Notes
+
+* **Port Conflicts:** If ports `3000` or `8000` are already in use, you can specify different ports.
+  * For frontend: `npm run dev -- -p 3001`
+  * For backend: `uvicorn main:app --reload --port 8001`
+* **Vector DB Issues:** If Chroma DB is acting up or locked, delete the `backend/chroma/` directory and restart the backend to re-initialize it.
+* **ModuleNotFoundError:** Ensure your Python virtual environment is activated before installing dependencies and running the server.
+* **Missing Env Vars:** If you get errors related to MongoDB or Ollama, double-check that your `.env` file exists in the `backend/` directory and has the correct keys.
+
+---
+
 ## Collaboration
 
-1. Clone the repo
-2. Install dependencies
-3. Add `.env` file
-4. Run frontend & backend
-
-# Python virtual env
-backend/new2/
-venv/
-.venv/
-env/
-
+1. Clone the repo (ensure you are using the existing collaborative repository).
+2. Install frontend and backend dependencies as detailed above.
+3. Add `.env` file to the backend.
+4. Run frontend & backend servers.
+5. Create a new branch for your feature, make sure not to commit secrets or cache files.
 
 ## License
 

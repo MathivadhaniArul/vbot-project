@@ -1,6 +1,6 @@
 'use client';
 
-import { Fragment, useState, useCallback } from 'react';
+import { Fragment, useState, useCallback, useRef } from 'react';
 import { useChat } from '@ai-sdk/react';
 
 import ChatSidebar from '@/components/ChatSidebar';
@@ -29,7 +29,7 @@ import { Actions, Action } from '@/components/ai-elements/actions';
 import { Suggestions, Suggestion } from '@/components/ai-elements/suggestion';
 import { Loader } from '@/components/ai-elements/loader';
 
-import { CopyIcon } from 'lucide-react';
+import { CopyIcon, Mic, MicOff } from 'lucide-react';
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -67,14 +67,155 @@ export default function ChatBotDemo() {
 
   const { messages, setMessages, status } = useChat();
   const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
 
   const refreshSidebar = useCallback(() => {
     setRefreshCounter(prev => prev + 1);
   }, []);
 
+  const [isRecording, setIsRecording] = useState(false);
+  const recorderRef = useRef<any>(null);
+
+  const startRecording = async () => {
+    if (isLoading) return;
+    try {
+      const RecordRTC = (await import("recordrtc")).default;
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          sampleRate: 44100,
+        },
+      });
+
+      const recorder = new RecordRTC(stream, {
+        type: "audio",
+        mimeType: "audio/wav",
+        recorderType: (RecordRTC as any).StereoAudioRecorder,
+        desiredSampRate: 16000,
+        numberOfAudioChannels: 1,
+      });
+
+      recorder.startRecording();
+
+      recorderRef.current = { recorder, stream };
+      setIsRecording(true);
+      console.log("✅ RecordRTC recording started");
+    } catch (err) {
+      console.error("Error accessing microphone:", err);
+    }
+  };
+
+  const stopRecording = () => {
+    if (!recorderRef.current || !isRecording) return;
+
+    recorderRef.current.recorder.stopRecording(async () => {
+      const blob = recorderRef.current.recorder.getBlob();
+      console.log("🔊 Recording blob size:", blob.size, "bytes");
+      console.log("🔊 Recording blob type:", blob.type);
+
+      // Stop all mic tracks
+      recorderRef.current.stream
+        .getTracks()
+        .forEach((track: MediaStreamTrack) => track.stop());
+
+      recorderRef.current = null;
+      setIsRecording(false);
+
+      if (blob.size < 1000) {
+        console.warn("⚠️ Recording too small, likely empty audio");
+        return;
+      }
+
+      await handleVoiceSubmit(blob);
+    });
+  };
+
+  const handleVoiceSubmit = async (audioBlob: Blob) => {
+    let chatId = activeChatId;
+
+    if (!chatId) {
+      chatId = crypto.randomUUID();
+      setActiveChatId(chatId);
+      refreshSidebar();
+    }
+
+    // RecordRTC produces WAV audio
+    const formData = new FormData();
+    formData.append("file", audioBlob, "recording.wav");
+    formData.append("chatId", chatId);
+    formData.append("userId", userId);
+
+    setMessages(prev => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        role: 'user',
+        parts: [{ type: 'text', text: '🎙️ Processing voice...' }],
+      },
+    ]);
+
+    setIsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/voice`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const errorData = await res.text();
+        console.error("Voice API error:", errorData);
+        throw new Error("Voice processing failed");
+      }
+
+      // Read the audio blob FIRST before trying to read headers
+      const blob = await res.blob();
+
+      const userTextRaw = res.headers.get("X-User-Text");
+      const assistantTextRaw = res.headers.get("X-Assistant-Text");
+
+      const userText = userTextRaw ? decodeURIComponent(userTextRaw) : "Voice Message";
+      const assistantText = assistantTextRaw ? decodeURIComponent(assistantTextRaw) : "Audio response";
+
+      setMessages(prev => {
+        const newMessages = [...prev];
+        newMessages[newMessages.length - 1] = {
+          id: crypto.randomUUID(),
+          role: 'user',
+          parts: [{ type: 'text', text: `🎙️ ${userText}` }],
+        };
+        newMessages.push({
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          parts: [{ type: 'text', text: assistantText }],
+        });
+        return newMessages;
+      });
+
+      const audioUrl = URL.createObjectURL(blob);
+      const audio = new Audio(audioUrl);
+      audio.play();
+
+      refreshSidebar();
+    } catch (err) {
+      console.error("Voice submit error:", err);
+      setMessages(prev => {
+        const newMessages = [...prev];
+        newMessages[newMessages.length - 1] = {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          parts: [{ type: 'text', text: '❌ Voice processing failed. Please try again or type your question.' }],
+        };
+        return newMessages;
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   // Send message
-  const handleSubmit = async ({ text }: { text: string }) => {
-    if (!text.trim()) return;
+  const handleSubmit = async ({ text }: { text?: string }) => {
+    if (!text || !text.trim() || isLoading) return;
 
     let chatId = activeChatId;
 
@@ -96,6 +237,7 @@ export default function ChatBotDemo() {
       },
     ]);
 
+    setIsLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/chat`, {
         method: "POST",
@@ -127,6 +269,8 @@ export default function ChatBotDemo() {
           parts: [{ type: 'text', text: ' Error connecting to backend.' }],
         },
       ]);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -157,7 +301,7 @@ export default function ChatBotDemo() {
     if (!feedback.trim()) return;
     setSubmitting(true);
 
-    await fetch("/api/feedback", {
+    await fetch(`${API_BASE}/api/feedback`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ feedback }),
@@ -313,7 +457,7 @@ export default function ChatBotDemo() {
           label="Copy"
           onClick={() =>
             navigator.clipboard.writeText(
-              message.parts.map((p) => p.text).join("\n")
+              message.parts.map((p) => p.type === 'text' ? p.text : '').join('\n')
             )
           }
         >
@@ -324,7 +468,7 @@ export default function ChatBotDemo() {
   </div>
 ))}
 
-              {status === 'submitted' && <Loader />}
+              {(status === 'submitted' || isLoading) && <Loader />}
 
             </ConversationContent>
 
@@ -347,7 +491,30 @@ export default function ChatBotDemo() {
             </PromptInputBody>
 
             <PromptInputFooter>
-              <PromptInputSubmit disabled={!input.trim()} />
+              <div className="flex gap-2">
+                {!isRecording ? (
+                  <Button
+                    variant="secondary"
+                    size="icon"
+                    className="rounded-full"
+                    onClick={startRecording}
+                    title="Start recording"
+                  >
+                    <Mic className="w-5 h-5" />
+                  </Button>
+                ) : (
+                  <Button
+                    variant="destructive"
+                    size="icon"
+                    className="rounded-full animate-pulse"
+                    onClick={stopRecording}
+                    title="Stop recording"
+                  >
+                    <MicOff className="w-5 h-5" />
+                  </Button>
+                )}
+                <PromptInputSubmit disabled={!input.trim() || isLoading} />
+              </div>
             </PromptInputFooter>
           </PromptInput>
 

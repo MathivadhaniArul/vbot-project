@@ -41,10 +41,16 @@ next-env.d.ts
 
 # python cache
 
-**pycache**/
+__pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# temporary audio and database files
+backend/tmp*.wav
+backend/tmp*.webm
+backend/pipeline_metadata.db
+backend/ffmpeg_bin/
 
 # virtual environments
 
