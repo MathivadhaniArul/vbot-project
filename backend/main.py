@@ -22,11 +22,11 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
 # LangChain
-from langchain.schema import Document
+from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_ollama import ChatOllama
 from langchain_community.vectorstores import Chroma
-from langchain.memory import ConversationSummaryMemory
+#from langchain.memory import ConversationSummaryMemory
 from db_memory import load_memory, save_memory_summary
 from langchain.chains import create_history_aware_retriever
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -55,7 +55,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 os.environ["PATH"] += os.pathsep + str(Path(__file__).resolve().parent / "ffmpeg_bin")
 
 app = FastAPI()
-
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
 client = AsyncIOMotorClient("mongodb://localhost:27017")
 db = client["chatbot_db"]
@@ -80,7 +80,7 @@ chat_memories = {}
 
 llm = ChatOllama(model="llama3:8b", temperature=0.2)
 
-whisper_model = whisper.load_model("base")
+whisper_model = whisper.load_model("small")
 _whisper_executor = ThreadPoolExecutor(max_workers=1)
 
 # embeddings = OllamaEmbeddings(
@@ -96,10 +96,12 @@ embeddings = HuggingFaceEmbeddings(
 def structure_chunk(data):
     chunks = []
 
+
     for url, sections in data.items():
         for heading, contents in sections.items():
 
-            
+
+           
             if "frequently asked questions" in heading.lower():
                 for item in contents:
                     chunks.append({
@@ -109,19 +111,43 @@ def structure_chunk(data):
                         "content": item
                     })
 
-            else:
-                combined = " ".join(contents)
-            
+
+            elif isinstance(contents, dict):
+             
+                for key, value in contents.items():
+                    combined = f"{value}"
+                    chunks.append({
+                        "type": "section",
+                        "source": url,
+                        "heading": heading,
+                        "subcontent": key,
+                        "content": combined
+                    })
+                all = list(contents.keys())
+                all.remove("BEWARE OF ILLEGAL/FAKE WEBSITES")
+                chunks.append({
+                    "type": "list",
+                    "source": url,
+                    "heading": f"{heading} list",
+                    "subcontent": "all clubs/chapters",
+                    "content": ", ".join(all)
+                    })
+                   
+            elif isinstance(contents, list):
+                length = len(contents)
+                combined=""
+                for i in range(0, length):
+                    combined += f"{contents[i]}\n"
                 chunks.append({
                         "type": "section",
                         "source": url,
                         "heading": heading,
                         "content": combined
                     })
+               
+
 
     return chunks
-
-
 
 
 def hash_text(text: str):
@@ -129,59 +155,82 @@ def hash_text(text: str):
 
 
 
-def clean_text(text):
-    
-    text = re.sub(r'\*\*', '', text)
-    
-    text = re.sub(r'^\s*#(?!#)\s*', '', text, flags=re.MULTILINE)
-
+def clean_text(text: str):
+    text = re.sub(r'(\*\*|__)', '', text)
     return text.strip()
 
 
 def split_markdown_with_subsections(md_text):
-    sections = []
-    current_header = None
-    current_content = []
-
     md_text = clean_text(md_text)
 
-  
-    for line in md_text.splitlines():
-        if re.match(r"^\s*##\s+", line):
-            if current_header:
-                sections.append((current_header, "\n".join(current_content)))
 
-            current_header = re.sub(r"^\s*##\s+", "", line).strip()
+    chunks = []
+
+
+    current_h1 = ""
+    current_h2 = ""
+    current_h3 = ""
+    current_content = []
+
+
+    def save_chunk():
+        content = "\n".join(line.strip() for line in current_content).strip()
+
+        if content:
+            chunks.append({
+                "type": "section",
+                "heading": current_h1,
+                "subheading": current_h2,
+                "subsubheading": current_h3,
+                "content": content
+            })
+
+
+    for line in md_text.splitlines():
+
+
+        h1 = re.match(r"^\s*#\s+(.*)", line)
+        h2 = re.match(r"^\s*##\s+(.*)", line)
+        h3 = re.match(r"^\s*###\s+(.*)", line)
+
+
+
+        if h1:
+            save_chunk()
+
+
+            current_h1 = h1.group(1).strip()
+            current_h2 = ""
+            current_h3 = ""
             current_content = []
+
+
+        elif h2:
+            save_chunk()
+
+
+            current_h2 = h2.group(1).strip()
+            current_h3 = ""
+            current_content = []
+
+
+        elif h3:
+            save_chunk()
+
+
+            current_h3 = h3.group(1).strip()
+            current_content = []
+
+
         else:
             current_content.append(line)
 
-    if current_header:
-        sections.append((current_header, "\n".join(current_content)))
 
-    
-    final_chunks = []
+    save_chunk()
 
-    for heading, content in sections:
-        parts = re.split(r"\n(?=\d+\s*\.\s*\d+\s*)", content)
 
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
+    return chunks
 
-            lines = part.split("\n", 1)
-            subheading = lines[0].strip()
-            subcontent = lines[1].strip() if len(lines) > 1 else ""
-
-            final_chunks.append({
-                "type": "section",
-                "heading": heading,
-                "subheading": subheading,
-                "content": subcontent
-            })
-              
-    return final_chunks
 
 async def ensure_chat(chat_id: str, user_id: str, first_message: str):
     chat = await chats_collection.find_one({"_id": chat_id})
@@ -213,7 +262,7 @@ def startup():
     docsearch = Chroma(
     collection_name="vit-regulations",
     embedding_function=embeddings,
-    persist_directory="./chroma"
+    persist_directory=str(BASE_DIR / "chroma")
     )
      
     data=[]
@@ -230,72 +279,107 @@ def startup():
             chunks = split_markdown_with_subsections(text)
             
             for chunk in chunks:
-                content = f"""
-                Heading: {chunk['heading']}
-                Subsection: {chunk['subheading']}
-                
-                Content: {chunk['content']}
-                """
+                parts = [
+                    chunk.get('heading') or "",
+                    chunk.get('subheading') or "",
+                    chunk.get('subsubheading') or "",
+                    chunk.get('content') or ""
+                    ]
+                content = ". ".join([p for p in parts if p])
+               
                 docs.append(
-        Document(
+                   Document(
             page_content=content.strip(),
             metadata={
-                "id": hash_text(content),
-                "heading": chunk["heading"],
-                "subheading": chunk["subheading"],
-                "type": chunk["type"],
-                "source": str(path.relative_to(BASE_DIR))
+                "id": hash_text(chunk.get("content"))or "",
+                "heading": chunk.get("heading") or "",
+                "subheading": chunk.get("subheading") or "",
+                "subsubheading": chunk.get("subsubheading") or "",
+                "type": chunk.get("type") or "",
+                "source": str(path.relative_to(BASE_DIR)),
+                "keywords": " ".join([
+                    chunk.get("heading") or "",
+                    chunk.get("subheading") or "",
+                    chunk.get("subsubheading") or ""
+                ]).lower()
             }
         )
     )
-        with open("scrape/vit_final_with_links.json", encoding="utf-8") as f:
-            data = json.load(f)
-        chunks = structure_chunk(data)
-        with open("vit_chunks.json", "w", encoding="cp1252") as f:
-            json.dump(chunks, f, indent=2, ensure_ascii=False)
         
-        for chunk in chunks:
+        JSON_FILES = [
+    r"C:/Users/mathi/OneDrive/Desktop/shadcn-bot/ai-chatbot/backend/scrape/vit_final_with_links.json",
+    r"C:/Users/mathi/OneDrive/Desktop/shadcn-bot/ai-chatbot/backend/scrape/vit_all_data.json"
+]
+        def safe_meta(value):
+            if value is None:
+                return ""
+            return str(value)
+
+        all_chunks = []
+        for file_path in JSON_FILES:
+       
+          print(f" Processing: {file_path}")
+          with open(file_path, encoding="utf-8") as f:
+            data = json.load(f)
+            chunks = structure_chunk(data)
+            all_chunks.extend(chunks)   # combine all chunks
+
+
+
+        with open("vit_chunks.json", "w", encoding="cp1252") as f:
+            json.dump(all_chunks, f, indent=2, ensure_ascii=False)
+        
+        for chunk in all_chunks:
             content = f"""
-            Heading: {chunk['heading']}
-            Content: {chunk['content']}
+            Category: {chunk.get('heading','')}
+            Name: {chunk.get('subcontent','')}
+            Description: {chunk.get('content','')}
             """
             docs.append(
         Document(
             page_content=content.strip(),
             metadata={
-                "id": hash_text(content),
-                "source": chunk.get("source"),
-                "heading": chunk.get("heading"),
-                "type": chunk.get("type")
-            }
+    "id": safe_meta(hash_text(content)),
+    "source": safe_meta(chunk.get("source")),
+    "heading": safe_meta(chunk.get("heading")),
+    "subheading": safe_meta(chunk.get("subcontent")),
+    "type": safe_meta(chunk.get("type")),
+    "keywords": (
+        safe_meta(chunk.get("subcontent")) + " " +
+        safe_meta(chunk.get("heading"))
+    ).lower()
+}
         )
     )
-        # Also index Riviera data
-        riviera_path = BASE_DIR / "riviera_chunks.json"
-        if riviera_path.exists():
-            print("Indexing Riviera data...")
-            with open(riviera_path, encoding="utf-8") as f:
-                riviera_data = json.load(f)
-            riviera_chunks = structure_chunk(riviera_data)
-            for chunk in riviera_chunks:
-                content = f"""
-                Heading: {chunk['heading']}
-                Content: {chunk['content']}
-                """
-                docs.append(
-                    Document(
-                        page_content=content.strip(),
-                        metadata={
-                            "id": hash_text(content),
-                            "source": chunk.get("source") or "riviera_website",
-                            "heading": chunk.get("heading"),
-                            "type": chunk.get("type", "section")
-                        }
-                    )
-                )
-            print(f"Riviera chunks added: {len(riviera_chunks)}")
-        else:
-            print("Warning: riviera_chunks.json not found, skipping.")
+   
+        print("Chunking complete!")
+
+        # # Also index Riviera data
+        # riviera_path = BASE_DIR / "scrape/riviera_data.json"
+        # if riviera_path.exists():
+        #     print("Indexing Riviera data...")
+        #     with open(riviera_path, encoding="utf-8") as f:
+        #         riviera_data = json.load(f)
+        #     riviera_chunks = structure_chunk(riviera_data)
+        #     for chunk in riviera_chunks:
+        #         content = f"""
+        #         Heading: {chunk['heading']}
+        #         Content: {chunk['content']}
+        #         """
+        #         docs.append(
+        #             Document(
+        #                 page_content=content.strip(),
+        #                 metadata={
+        #                     "id": hash_text(content),
+        #                     "source": chunk.get("source") or "riviera_website",
+        #                     "heading": chunk.get("heading"),
+        #                     "type": chunk.get("type", "section")
+        #                 }
+        #             )
+        #         )
+        #     print(f"Riviera chunks added: {len(riviera_chunks)}")
+        # else:
+        #     print("Warning: riviera_chunks.json not found, skipping.")
         print("Chunking complete!")
             
             
@@ -313,56 +397,76 @@ def startup():
     
     
     template = """
-You are an expert assistant for VIT Vellore, specializing in Academic Regulations and the Riviera 2026 Cultural Fest.
+You are an helpful assistant for VIT .
+
 
 Answer ONLY using the provided context.
+
 
 -----------------------------
 STRICT RULES
 -----------------------------
 
-1. NO GUESSING
-- Do NOT infer, assume, or add information.
-- If the answer is not explicitly in the context, say:
-  "This information is not mentioned in the provided documents."
 
-2. EXACTNESS
-- Do NOT change numbers, dates, inequalities, or conditions.
-- Use them exactly as written in the context.
+1. ANSWER FROM CONTEXT (VERY IMPORTANT)
+- Extract the answer from:
+  • headings
+  • labels
+  • content
+- If the answer appears ANYWHERE → treat it as AVAILABLE.
+- DO NOT ignore headings.
 
-3. CONTEXT RELEVANCE
-- Answer ONLY if the context is clearly relevant to the question.
-- If the context is unrelated, say:
-  "The retrieved context is not relevant to the question."
 
-4. ACRONYMS
-- If defined in the context → use that meaning.
-- If NOT defined → say:
-  "The acronym is not defined in the provided documents."
+2. NO CONTRADICTIONS
+- NEVER say "not available" if answer exists.
 
-5. FOLLOW-UP QUESTIONS
-- For words like "it", "this", "that":
-  → refer ONLY to the most recent topic.
-- If the context does not contain information about that topic → do NOT answer.
+
+3. EXACTNESS
+- Do NOT change numbers or conditions.
+
+
+4. WHEN TO REFUSE
+- ONLY say:
+  "The retrieved context is not relevant to the question"
+  if completely unrelated.
+
+
+5. STYLE
+- Do NOT copy text
+- Explain clearly in your own words
+- Keep it natural and concise
+- DO NOT include phrases like:
+  • "According to the provided context"
+  • "The context states"
+  • "This information is found in"
+  • "As mentioned above"
+- DO NOT reference the context at all.
+- Start directly with the answer.
+- Always use provided data to fully answer the user before mentioning any external link. Never respond with only a URL or reference.
+
+
 """
+
     
     
     qa_prompt = ChatPromptTemplate.from_messages([
     ("system",template),
     MessagesPlaceholder("chat_history"),
     ("human", """
-You must answer ONLY using the context below.
-
-If the answer is not present, say:
-"This information is not mentioned in the provided documents."
-
 Context:
 {context}
 
+
 Question:
 {input}
+
+
+Instructions:
+- If ANY relevant information exists → answer
+- Do NOT say "not available" unless context is completely unrelated
 """)
 ])
+
     
     def setup_retriever(docsearch):
         base_retriever = docsearch.as_retriever(search_type="mmr",
@@ -383,11 +487,50 @@ Question:
     retriever = setup_retriever(docsearch)
     contextualize_q_prompt = ChatPromptTemplate.from_messages([
     ("system",
-     "Given the chat history and the latest user question, "
-     "rewrite the question to be standalone. "
-     "Do NOT answer the question ,If the question is already standalone, return it unchanged."),
+     """
+You are a query rewriting assistant for a retrieval system.
+
+
+Your job is to convert the user's latest question into a COMPLETE and SPECIFIC query.
+
+
+RULES:
+- Use chat history to understand context
+- Expand vague queries into full meaningful questions
+- Replace words like:
+  • "it", "this", "that", "other", "more"
+  with the actual topic
+- Always include key terms (like SAP, clubs, eligibility, etc.)
+
+
+- DO NOT answer the question
+- ONLY return the rewritten query
+
+
+EXAMPLES:
+
+
+Chat:
+User: in which semester can we do SAP?
+User: other dept?
+→ Rewritten: SAP semester eligibility for all programs and departments
+
+
+Chat:
+User: tell me about ALPHA BIO CELL
+User: tell more
+→ Rewritten: detailed description of ALPHA BIO CELL club
+
+
+Chat:
+User: list technical clubs
+User: what about others
+→ Rewritten: list all technical clubs
+"""),
     MessagesPlaceholder("chat_history"),
-    ("human", "{input}")])
+    ("human", "{input}")
+])
+
     
     
     
@@ -406,7 +549,10 @@ Question:
     history_aware_retriever,
     question_answer_chain)
     
-    results = retriever.get_relevant_documents("want industrial visit form")
+    results = retriever.get_relevant_documents(
+    "what is the eligibility for sap",
+    k=50
+)
 
     for r in results:
         print("----")
@@ -591,38 +737,59 @@ async def voice_chat(
 
         # Convert text to speech
         tts_audio_path = tempfile.NamedTemporaryFile(
-            delete=False, suffix=".mp3", dir="."
-        ).name
-        tts = edge_tts.Communicate(text=answer, voice="en-US-GuyNeural")
-        await tts.save(tts_audio_path)
+            delete=False,
+            suffix=".mp3",
+            dir=".").name
+        try:
+            tts = edge_tts.Communicate(
+                text=answer,
+                voice="en-US-GuyNeural"
+                )
+            await asyncio.wait_for(
+        tts.save(tts_audio_path),
+        timeout=20
+    )
 
-        # Encode text for headers
-        headers = {
-            "X-User-Text": urllib.parse.quote(user_text),
-            "X-Assistant-Text": urllib.parse.quote(answer)
-        }
+    # Encode text for headers
+            headers = {
+        "X-User-Text": urllib.parse.quote(user_text),
+        "X-Assistant-Text": urllib.parse.quote(answer)
+    }
 
-        # Schedule cleanup AFTER the response is sent
-        background_tasks.add_task(os.remove, tts_audio_path)
+    # Cleanup after response
+            background_tasks.add_task(os.remove, tts_audio_path)
+            return FileResponse(
+        tts_audio_path,
+        media_type="audio/mpeg",
+        headers=headers
+    )
 
-        return FileResponse(
-            tts_audio_path,
-            media_type="audio/mpeg",
-            headers=headers
-        )
+        except Exception as tts_error:
+            print("TTS failed:", tts_error)
 
+    # remove broken temp file
+            if os.path.exists(tts_audio_path):
+                os.remove(tts_audio_path)
+
+    # fallback → text response only
+            return {
+        "user_text": user_text,
+        "answer": answer,
+        "audio": False
+    }  
     except Exception as e:
         print("Voice chat error:", e)
-        # Clean up TTS file on error
+
         if tts_audio_path and os.path.exists(tts_audio_path):
             os.remove(tts_audio_path)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        # Always clean up the input audio temp file
-        if os.path.exists(temp_audio.name):
-            # os.remove(temp_audio.name)
-            pass
 
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+    # Always clean up input audio file
+       if os.path.exists(temp_audio.name):
+        # os.remove(temp_audio.name)
+        pass
 @app.get("/api/chats")
 async def get_chats(userId: str):
     chats = await chats_collection.find(

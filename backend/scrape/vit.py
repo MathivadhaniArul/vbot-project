@@ -26,76 +26,239 @@ urls = [
     'https://vit.ac.in/sc-st-cell',
     'https://vit.ac.in/vit-privacy-policy/',
     'https://vit.ac.in/scholarship',
-    'https://vit.ac.in/instruction'
+    'https://vit.ac.in/instruction',
+    'https://vit.ac.in/counselling-division'
+]
+
+# 🔥 HEADERS / FOOTERS / COMMON SECTIONS TO REMOVE
+REMOVE_HEADINGS = {
+    "VIT @ Connect",
+    "Other Links",
+    "Quick Links",
+    "VISITORS",
+    "Committees @ VIT",
+    "Don't Trust Fake Website/ Page / Channels",
+    "BEWARE OF ILLEGAL/FAKE WEBSITES",
+    "Last Updated : June 2025",
+    "Undergraduate Admission",
+    "Undergraduate NRI / Foreign Admission",
+    "Postgraduate Admission",
+    "Postgraduate NRI / Foreign Admission",
+    "Research",
+    "Research NRI / Foreign",
+    "VIT Online Education",
+    "Others",
+    "Beware of VITEEE fake websites",
+    "Announcements",
+    "Career Development Centre",
+    "Recruiting Companies",
+    "International Admission",
+    "Research Organisation",
+    "Students Welfare"
+}
+
+# 🔥 COMMON TEXTS TO REMOVE
+REMOVE_TEXT_CONTAINS = [
+    "Campus Tour",
+    "Student Login",
+    "Parent Login",
+    "VIT Intranet",
+    "VITAA Website",
+    "Last Updated:",
+    "Copyrights ©",
+    "Admissions Open",
+    "Beware of fraudulent",
 ]
 
 all_data = {}
 
 for url in urls:
     print(f"Scraping: {url}")
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, 'html.parser')
 
-    page_data = defaultdict(list)
-    current_heading = f"{url.split('/')[-1]} - Introduction"
+    try:
+        response = requests.get(url, timeout=20)
+        soup = BeautifulSoup(response.text, 'html.parser')
 
-    for elem in soup.find_all(['h1', 'h2', 'h3', 'p', 'table', 'ul', 'ol']):
+        # 🔥 REMOVE HEADER / FOOTER / NAV / SIDEBAR
+        for tag in soup.find_all([
+            'header',
+            'footer',
+            'nav',
+            'aside'
+        ]):
+            tag.decompose()
 
-        if elem.name and elem.name.startswith('h'):
-            current_heading = elem.get_text(strip=True) or current_heading
+        # 🔥 REMOVE COMMON DIVS
+        for div in soup.find_all(
+            class_=lambda x: x and any(
+                k in str(x).lower()
+                for k in [
+                    'header',
+                    'footer',
+                    'menu',
+                    'navigation',
+                    'sidebar',
+                    'announcement',
+                    'breadcrumb',
+                    'popup',
+                    'newsletter'
+                ]
+            )
+        ):
+            div.decompose()
 
-        else:
+        page_data = defaultdict(list)
+
+        current_heading = (
+            f"{url.split('/')[-1]} - Introduction"
+        )
+
+        for elem in soup.find_all([
+            'h1', 'h2', 'h3',
+            'p', 'table', 'ul', 'ol'
+        ]):
+
+            # 🔹 HEADINGS
+            if elem.name.startswith('h'):
+
+                heading = elem.get_text(
+                    separator=' ',
+                    strip=True
+                )
+
+                if heading:
+                    current_heading = heading
+
+                continue
+
+            # 🔥 SKIP COMMON HEADINGS
+            if current_heading in REMOVE_HEADINGS:
+                continue
+
             texts = []
             links = []
 
-            # 🔹 Extract text
+            # 🔹 TEXT EXTRACTION
             for t in elem.stripped_strings:
-                texts.append(t.strip())
+                cleaned = t.strip()
 
-            # 🔹 Extract links
+                if cleaned:
+                    texts.append(cleaned)
+
+            # 🔹 LINK EXTRACTION
             for a in elem.find_all('a', href=True):
+
                 link_text = a.get_text(strip=True)
                 link_url = urljoin(url, a['href'])
 
-                if link_url and not link_url.startswith("javascript"):
-                    # keep only useful links (optional filter)
-                    if any(x in link_url.lower() for x in ['pdf', 'download', 'form', 'apply']):
-                        links.append(f"{link_text} ({link_url})")
-                    else:
-                        links.append(f"{link_text} ({link_url})")
+                if (
+                    link_url and
+                    not link_url.startswith("javascript")
+                ):
+                    links.append(
+                        f"{link_text} ({link_url})"
+                    )
 
-            # 🔹 Merge text + links into SAME LIST (your format)
+            # 🔹 MERGE
             combined = " ".join(texts)
 
-            # Append links into text
             if links:
                 combined += " | " + " | ".join(links)
 
-            if combined.strip():
+            combined = combined.strip()
+
+            # 🔥 SKIP EMPTY
+            if not combined:
+                continue
+
+            # 🔥 REMOVE COMMON FOOTER TEXTS
+            skip = False
+
+            for bad_text in REMOVE_TEXT_CONTAINS:
+                if bad_text.lower() in combined.lower():
+                    skip = True
+                    break
+
+            if skip:
+                continue
+
+            # 🔥 REMOVE VERY SHORT GARBAGE
+            if len(combined) < 8:
+                continue
+
+            # 🔥 REMOVE DUPLICATES
+            if combined not in page_data[current_heading]:
                 page_data[current_heading].append(combined)
 
-    # 🔹 FAQ extraction
-    faqs = soup.select('.elementor-tab-title, .elementor-tab-content')
-    current_q = None
+        # 🔹 FAQ EXTRACTION
+        faqs = soup.select(
+            '.elementor-tab-title, .elementor-tab-content'
+        )
 
-    for elem in faqs:
-        classes = elem.get('class', [])
+        current_q = None
 
-        if 'elementor-tab-title' in classes:
-            current_q = elem.get_text(strip=True)
+        for elem in faqs:
 
-        elif 'elementor-tab-content' in classes:
-            answer = elem.get_text(strip=True)
+            classes = elem.get('class', [])
 
-            if current_q and answer:
-                page_data["Frequently Asked Questions"].append(
-                    f"Q: {current_q} | A: {answer}"
+            if 'elementor-tab-title' in classes:
+
+                current_q = elem.get_text(
+                    strip=True
                 )
 
-    all_data[url] = dict(page_data)
+            elif 'elementor-tab-content' in classes:
 
-# 🔹 SAVE
-with open('vit_final_with_links.json', 'w', encoding='utf-8') as f:
-    json.dump(all_data, f, indent=2, ensure_ascii=False)
+                answer = elem.get_text(
+                    strip=True
+                )
 
-print("\n✅ Done: JSON with links saved.")
+                if current_q and answer:
+
+                    faq_text = (
+                        f"Q: {current_q} | "
+                        f"A: {answer}"
+                    )
+
+                    # 🔥 FILTER FAQ GARBAGE
+                    if not any(
+                        bad.lower() in faq_text.lower()
+                        for bad in REMOVE_TEXT_CONTAINS
+                    ):
+                        page_data[
+                            "Frequently Asked Questions"
+                        ].append(faq_text)
+
+        # 🔥 REMOVE EMPTY HEADINGS
+        cleaned_page_data = {}
+
+        for heading, content in page_data.items():
+
+            if (
+                heading not in REMOVE_HEADINGS
+                and content
+            ):
+                cleaned_page_data[heading] = content
+
+        all_data[url] = cleaned_page_data
+
+    except Exception as e:
+        print(f"❌ Error scraping {url}")
+        print(e)
+
+# 🔹 SAVE JSON
+with open(
+    'vit_final_with_links.json',
+    'w',
+    encoding='utf-8'
+) as f:
+
+    json.dump(
+        all_data,
+        f,
+        indent=2,
+        ensure_ascii=False
+    )
+
+print("\n✅ Done: Clean JSON saved.")
+
