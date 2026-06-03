@@ -24,13 +24,31 @@ Built with a modern stack combining Next.js frontend and FastAPI backend.
 
 ---
 
-##  Features
+## Features
 
+* **Role-Based Authentication**: Secure login system supporting multiple roles (Student, Parent, Teacher) with visual badges and session persistence.
 * Chat interface with persistent history
 * RAG-based answers from documents
 * Context-aware retrieval
 * Web scraping + document indexing
 * FastAPI backend with async support
+
+---
+
+## Role-Based Authentication & Session Management
+
+To control access to the V-Bot chatbot, a glassmorphic login system has been integrated. It supports the following details:
+
+### 👤 Testing Credentials
+You can use any username/password combination to log in. Select a role and input credentials:
+- **Roles:** `Student`, `Parent`, or `Teacher`
+- **Username:** E.g., `adith`
+- **Password:** E.g., `password123`
+
+Upon successful authentication:
+- The session is saved to `localStorage` as `vbot_user` and `vbot_role`.
+- Unauthenticated users attempting to visit the chat root `/` will be auto-redirected to `/login`.
+- The current user's role and username are displayed dynamically in the top-right header dropdown, containing a functional **Logout** option.
 
 ---
 
@@ -90,6 +108,13 @@ The frontend runs on: [http://localhost:3000](http://localhost:3000)
    ```bash
    cd backend
    pip install -r requirements.txt
+   
+   # For Windows (PowerShell) to avoid encoding crashes:
+   $env:PYTHONIOENCODING="utf-8"
+   py -3.11 main.py
+
+   # For Linux/macOS/Bash:
+   export PYTHONIOENCODING="utf-8"
    python main.py
    ```
 The backend runs on: [http://localhost:8000](http://localhost:8000)
