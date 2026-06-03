@@ -58,7 +58,11 @@ os.environ["PATH"] += os.pathsep + str(Path(__file__).resolve().parent / "ffmpeg
 app = FastAPI()
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
-client = AsyncIOMotorClient("mongodb://host.docker.internal:27017")
+mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+if not os.path.exists("/.dockerenv") and ("mongodb:27017" in mongo_uri or "host.docker.internal" in mongo_uri):
+    mongo_uri = "mongodb://localhost:27017"
+
+client = AsyncIOMotorClient(mongo_uri)
 db = client["chatbot_db"]
 messages_collection = db["messages"]
 chats_collection = db["chats"]
@@ -83,8 +87,11 @@ rag_chain = None
 memory = None
 chat_memories = {}
 
-llm = ChatOllama(model="llama3:8b", temperature=0.2,
-base_url="http://host.docker.internal:11434")
+ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+if not os.path.exists("/.dockerenv") and "host.docker.internal" in ollama_url:
+    ollama_url = "http://localhost:11434"
+
+llm = ChatOllama(model="llama3:8b", temperature=0.2, base_url=ollama_url)
 
 whisper_model = whisper.load_model("small")
 _whisper_executor = ThreadPoolExecutor(max_workers=1)
