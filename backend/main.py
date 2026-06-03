@@ -1,5 +1,6 @@
 import uuid
 import os
+import uvicorn
 import re
 import json
 import shutil
@@ -57,7 +58,7 @@ os.environ["PATH"] += os.pathsep + str(Path(__file__).resolve().parent / "ffmpeg
 app = FastAPI()
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 
-client = AsyncIOMotorClient("mongodb://localhost:27017")
+client = AsyncIOMotorClient("mongodb://host.docker.internal:27017")
 db = client["chatbot_db"]
 messages_collection = db["messages"]
 chats_collection = db["chats"]
@@ -66,19 +67,24 @@ chats_collection = db["chats"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["X-User-Text", "X-Assistant-Text"],
 )
 
+
 retrieval_chain = None
 rag_chain = None
 memory = None
 chat_memories = {}
 
-llm = ChatOllama(model="llama3:8b", temperature=0.2)
+llm = ChatOllama(model="llama3:8b", temperature=0.2,
+base_url="http://host.docker.internal:11434")
 
 whisper_model = whisper.load_model("small")
 _whisper_executor = ThreadPoolExecutor(max_workers=1)
@@ -254,7 +260,7 @@ async def ensure_chat(chat_id: str, user_id: str, first_message: str):
 def startup():
     global retrieval_chain, memory,rag_chain
 
-    print("Building RAG pipeline...")
+    # print("Building RAG pipeline...")
 
     BASE_DIR = Path(__file__).resolve().parent
     REG_DIR = BASE_DIR / "reg_md"
@@ -268,7 +274,7 @@ def startup():
     data=[]
     
     
-    if docsearch._collection.count() == 0:
+    if False:
         print("Indexing documents...")
         docs = []
         for path in REG_DIR.rglob("*.md"):
@@ -307,8 +313,8 @@ def startup():
     )
         
         JSON_FILES = [
-    r"C:/Users/mathi/OneDrive/Desktop/shadcn-bot/ai-chatbot/backend/scrape/vit_final_with_links.json",
-    r"C:/Users/mathi/OneDrive/Desktop/shadcn-bot/ai-chatbot/backend/scrape/vit_all_data.json"
+    str(BASE_DIR / "scrape" / "vit_final_with_links.json"),
+    str(BASE_DIR / "scrape" / "vit_all_data.json")
 ]
         def safe_meta(value):
             if value is None:
@@ -549,14 +555,14 @@ User: what about others
     history_aware_retriever,
     question_answer_chain)
     
-    results = retriever.get_relevant_documents(
-    "what is the eligibility for sap",
-    k=50
-)
+#     results = retriever.get_relevant_documents(
+#     "what is the eligibility for sap",
+#     k=50
+# )
 
-    for r in results:
-        print("----")
-        print(r.page_content)
+#     for r in results:
+#         print("----")
+#         print(r.page_content)
         
     print(" RAG Ready!")
 
@@ -915,3 +921,8 @@ def shutdown():
 @app.get("/")
 async def root():
     return {"message": "Backend running"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

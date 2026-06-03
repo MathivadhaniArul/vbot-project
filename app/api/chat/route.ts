@@ -23,7 +23,8 @@ export async function POST(req: Request) {
     }
 
     // Call Python backend
-    const response = await fetch("http://127.0.0.1:8000/chat", {
+    const API_BASE = process.env.API_BASE || "http://host.docker.internal:8000";
+    const response = await fetch(`${API_BASE}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query: lastUserMessage.content }),

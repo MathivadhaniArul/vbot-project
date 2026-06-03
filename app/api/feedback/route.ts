@@ -1,7 +1,8 @@
 export async function POST(req: Request) {
   const body = await req.json();
 
-  const response = await fetch("http://127.0.0.1:8000/api/feedback", {
+  const API_BASE = process.env.API_BASE || "http://host.docker.internal:8000";
+  const response = await fetch(`${API_BASE}/api/feedback`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),

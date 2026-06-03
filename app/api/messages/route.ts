@@ -21,7 +21,8 @@ export async function POST(req: Request) {
   await Message.create({ chatId, role: "user", content });
 
   // Call FastAPI RAG backend
-  const res = await fetch("http://localhost:8000/api/chat", {
+  const API_BASE = process.env.API_BASE || "http://host.docker.internal:8000";
+  const res = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
