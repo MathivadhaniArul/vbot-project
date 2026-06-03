@@ -1,7 +1,9 @@
 'use client';
 
-import { Fragment, useState, useCallback, useRef } from 'react';
+import { Fragment, useState, useCallback, useRef, useEffect } from 'react';
 import { useChat } from '@ai-sdk/react';
+import { useRouter } from 'next/navigation';
+import { useAuth } from '@/lib/context/AuthContext';
 
 import ChatSidebar from '@/components/ChatSidebar';
 import { AnimatedThemeToggler } from "@/components/ui/theme_toggler";
@@ -58,16 +60,27 @@ const suggestions = [
 ];
 
 export default function ChatBotDemo() {
+  const router = useRouter();
+  const { user, loading, logout } = useAuth();
+
   const [activeChatId, setActiveChatId] = useState<string | undefined>();
   const [refreshCounter, setRefreshCounter] = useState(0);
   const [feedback, setFeedback] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [userId, setUserId] = useState("user1");
 
   const { messages, setMessages, status } = useChat();
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+
+  const userId = user?.username || "";
+
+  // Auth Guard
+  useEffect(() => {
+    if (!loading && !user) {
+      router.push("/login");
+    }
+  }, [user, loading, router]);
 
   const refreshSidebar = useCallback(() => {
     setRefreshCounter(prev => prev + 1);
@@ -319,6 +332,17 @@ export default function ChatBotDemo() {
     refreshSidebar();
   };
 
+  if (loading || !user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-10 h-10 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-sm text-muted-foreground animate-pulse">Initializing VBOT Assistant...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
    <main className="min-h-screen flex max-w-6xl w-full shadow-sm">
   
@@ -366,27 +390,22 @@ export default function ChatBotDemo() {
           </h1>
           <DropdownMenu>
   <DropdownMenuTrigger asChild>
-    <Button variant="outline" className="fixed top-4 right-15 z-50">
-      {userId}
+    <Button variant="outline" className="fixed top-4 right-15 z-50 capitalize gap-2 font-medium bg-background border-border/60 hover:bg-muted/30">
+      <span className="text-[11px] px-1.5 py-0.5 rounded-sm bg-muted/80 text-muted-foreground font-semibold uppercase">{user.role}</span>
+      <span>{userId}</span>
     </Button>
   </DropdownMenuTrigger>
 
-  <DropdownMenuContent>
-    <DropdownMenuGroup>
-      {["user1", "user2", "user3", "user4"].map((u) => (
-        <DropdownMenuItem
-          key={u}
-          onClick={() => {
-            setUserId(u);
-            setActiveChatId(undefined);
-            setMessages([]); // clear chat
-            refreshSidebar();
-          }}
-        >
-          {u}
-        </DropdownMenuItem>
-      ))}
-    </DropdownMenuGroup>
+  <DropdownMenuContent className="w-48 bg-popover border border-border/40 backdrop-blur-md">
+    <div className="px-2 py-1.5 text-xs text-muted-foreground border-b border-border/30 mb-1">
+      Role: <span className="font-semibold text-foreground">{user.role}</span>
+    </div>
+    <DropdownMenuItem
+      onClick={logout}
+      className="text-red-500 hover:text-red-600 focus:text-red-600 cursor-pointer"
+    >
+      Logout Session
+    </DropdownMenuItem>
   </DropdownMenuContent>
 </DropdownMenu>
           {/* Theme toggle */}

@@ -4,9 +4,10 @@ import Chat from "@/lib/models/Chat";
 
 export async function GET(
   _req: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   await connectDB();
-  const chat = await Chat.findById(params.id);
+  const { id } = await params;
+  const chat = await Chat.findById(id);
   return NextResponse.json(chat);
 }
