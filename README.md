@@ -55,46 +55,68 @@ ai-chatbot/
 
 ## Setup Instructions
 
-### Clone the repository
-
-```bash
-git clone https://github.com/YOUR_USERNAME/ai-chatbot.git
-cd ai-chatbot
-```
+Choose either the **Local Setup** or the **Docker Setup** (recommended for simplified deployment).
 
 ---
 
-### Frontend setup
+### Method 1: Local Setup
 
+#### 1. Clone the repository
 ```bash
+git clone https://github.com/MathivadhaniArul/vbot-project.git
+cd vbot-project
+```
+
+#### 2. Frontend Setup
+```bash
+# From the root directory
 npm install
 npm run dev
 ```
+The frontend runs on: [http://localhost:3000](http://localhost:3000)
 
-Runs on: http://localhost:3000
+#### 3. Backend Setup
+1. Create a `.env` file inside the `backend/` directory:
+   ```env
+   MONGO_URI=mongodb://localhost:27017
+   OLLAMA_BASE_URL=http://127.0.0.1:11434
+   ```
+2. Make sure MongoDB is running locally on port `27017`.
+3. Make sure Ollama is running and has the `llama3:8b` model pulled:
+   ```bash
+   ollama run llama3:8b
+   ```
+4. Install backend dependencies and run the server:
+   ```bash
+   cd backend
+   pip install -r requirements.txt
+   python main.py
+   ```
+The backend runs on: [http://localhost:8000](http://localhost:8000)
 
 ---
 
-### Backend setup
+### Method 2: Docker Setup (Docker Compose)
 
+The repository contains `Dockerfile`s for the frontend and backend, along with a `docker-compose.yml` to spin up the entire ecosystem (Next.js, FastAPI, and MongoDB).
+
+#### 1. Setup Ollama on Host Machine
+Ensure Ollama is running on your host machine. The Docker container will communicate with it via `http://host.docker.internal:11434`.
+Make sure Ollama has the required model pulled:
 ```bash
-cd backend
-pip install -r requirements.txt
-uvicorn main:app --reload
+ollama pull llama3:8b
 ```
 
-Runs on: http://localhost:8000
-
----
-
-## Environment Variables
-
-Create a `.env` file inside `backend/`:
-
-```env
-MONGO_URI=mongodb://localhost:27017
-OLLAMA_BASE_URL=http://127.0.0.1:11434
+#### 2. Run with Docker Compose
+Simply run the following command from the root directory of the project:
+```bash
+docker compose up --build
 ```
+
+This automatically orchestrates and starts:
+- **Next.js Frontend**: on [http://localhost:3000](http://localhost:3000)
+- **FastAPI Backend**: on [http://localhost:8000](http://localhost:8000)
+- **MongoDB Database**: on port `27017` inside Docker.
 
 ---
 
