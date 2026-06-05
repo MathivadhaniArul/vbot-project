@@ -1,7 +1,8 @@
 'use client';
 
-import { Fragment, useState, useCallback, useRef, useEffect } from 'react';
+import { Fragment, useState, useCallback, useRef,useEffect } from 'react';
 import { useChat } from '@ai-sdk/react';
+
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/context/AuthContext';
 
@@ -48,11 +49,17 @@ import {
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
-  DropdownMenuTrigger,
+  DropdownMenuTrigger,DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import { Languages } from "lucide-react"
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 
+
+const API_BASE = "http://localhost:8000";
+//const API_BASE =process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
 const suggestions = [
   "when absolute grading is adopted ?",
   "what is the FAT re-evaluation procedure?",
@@ -60,171 +67,176 @@ const suggestions = [
 ];
 
 export default function ChatBotDemo() {
-  const router = useRouter();
-  const { user, loading, logout } = useAuth();
-
   const [activeChatId, setActiveChatId] = useState<string | undefined>();
   const [refreshCounter, setRefreshCounter] = useState(0);
-  const [feedback, setFeedback] = useState("");
+  const router = useRouter();
+  const { user, loading, logout } = useAuth();
+  //const [feedback, setFeedback] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  //const [userId, setUserId] = useState("user1");
+  const [language, setLanguage] = useState("en");
 
   const { messages, setMessages, status } = useChat();
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-
   const userId = user?.username || "";
 
-  // Auth Guard
-  useEffect(() => {
-    if (!loading && !user) {
-      router.push("/login");
-    }
-  }, [user, loading, router]);
-
-  const refreshSidebar = useCallback(() => {
-    setRefreshCounter(prev => prev + 1);
-  }, []);
+ 
 
   const [isRecording, setIsRecording] = useState(false);
   const recorderRef = useRef<any>(null);
-
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [isProcessingAudio, setIsProcessingAudio] = useState(false);
   const startRecording = async () => {
-    if (isLoading) return;
-    try {
-      const RecordRTC = (await import("recordrtc")).default;
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          sampleRate: 44100,
-        },
-      });
+  if (isLoading || isRecording) return;
 
-      const recorder = new RecordRTC(stream, {
-        type: "audio",
-        mimeType: "audio/wav",
-        recorderType: (RecordRTC as any).StereoAudioRecorder,
-        desiredSampRate: 16000,
-        numberOfAudioChannels: 1,
-      });
+  try {
+    setIsListening(true);
 
-      recorder.startRecording();
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
 
-      recorderRef.current = { recorder, stream };
-      setIsRecording(true);
-      console.log("✅ RecordRTC recording started");
-    } catch (err) {
-      console.error("Error accessing microphone:", err);
+    streamRef.current = stream;
+
+    const RecordRTCModule = await import("recordrtc");
+    const RecordRTC = RecordRTCModule.default;
+
+    const recorder = new RecordRTC(stream, {
+      type: "audio",
+      mimeType: "audio/webm",
+    });
+
+    recorder.startRecording();
+
+    recorderRef.current = { recorder, stream };
+    setIsRecording(true);
+
+    startVAD(stream);
+
+  } catch (err) {
+    console.error(err);
+    setIsListening(false);
+    setIsRecording(false);
+  }
+};
+
+
+const startVAD = (stream: MediaStream) => {
+  const audioContext = new AudioContext();
+  audioContextRef.current = audioContext;
+
+  const source = audioContext.createMediaStreamSource(stream);
+  const analyser = audioContext.createAnalyser();
+
+  analyser.fftSize = 2048;
+  analyserRef.current = analyser;
+
+  source.connect(analyser);
+
+  const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+  const checkVolume = () => {
+    if (!analyserRef.current) return;
+
+    analyserRef.current.getByteTimeDomainData(dataArray);
+
+    let sum = 0;
+
+    for (let i = 0; i < dataArray.length; i++) {
+      const v = (dataArray[i] - 128) / 128;
+      sum += v * v;
     }
+
+    const rms = Math.sqrt(sum / dataArray.length);
+
+    const isSilent = rms < 0.01;
+
+    console.log("rms:", rms, "silent:", isSilent);
+
+    if (isSilent) {
+      if (!silenceTimerRef.current) {
+        silenceTimerRef.current = setTimeout(() => {
+          console.log("🛑 Auto stop triggered");
+          stopRecording();
+        }, 1200);
+      }
+    } else {
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
+    }
+
+    requestAnimationFrame(checkVolume);
   };
+
+  checkVolume();
+};
 
   const stopRecording = () => {
-    if (!recorderRef.current || !isRecording) return;
+  if (!recorderRef.current || !isRecording) return;
 
-    recorderRef.current.recorder.stopRecording(async () => {
-      const blob = recorderRef.current.recorder.getBlob();
-      console.log("🔊 Recording blob size:", blob.size, "bytes");
-      console.log("🔊 Recording blob type:", blob.type);
+  recorderRef.current.recorder.stopRecording(async () => {
+    const blob = recorderRef.current.recorder.getBlob();
 
-      // Stop all mic tracks
-      recorderRef.current.stream
-        .getTracks()
-        .forEach((track: MediaStreamTrack) => track.stop());
+    recorderRef.current.stream
+      .getTracks()
+      .forEach((t: MediaStreamTrack) => t.stop());
 
-      recorderRef.current = null;
-      setIsRecording(false);
+    recorderRef.current = null;
 
-      if (blob.size < 1000) {
-        console.warn("⚠️ Recording too small, likely empty audio");
-        return;
-      }
+    setIsRecording(false);
+    setIsListening(false);
 
-      await handleVoiceSubmit(blob);
-    });
-  };
+    audioContextRef.current?.close();
+    audioContextRef.current = null;
 
-  const handleVoiceSubmit = async (audioBlob: Blob) => {
-    let chatId = activeChatId;
-
-    if (!chatId) {
-      chatId = crypto.randomUUID();
-      setActiveChatId(chatId);
-      refreshSidebar();
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
     }
 
-    // RecordRTC produces WAV audio
+    if (blob.size < 1000) return;
+
+    await handleVoiceSubmit(blob);
+  });
+};
+ const [isListening, setIsListening] = useState(false);
+ const handleVoiceSubmit = async (audioBlob: Blob) => {
+  try {
+    setIsProcessingAudio(true);
+
     const formData = new FormData();
-    formData.append("file", audioBlob, "recording.wav");
-    formData.append("chatId", chatId);
-    formData.append("userId", userId);
+    formData.append("file", audioBlob, "recording.webm");
+    formData.append("language", language);
 
-    setMessages(prev => [
-      ...prev,
-      {
-        id: crypto.randomUUID(),
-        role: 'user',
-        parts: [{ type: 'text', text: '🎙️ Processing voice...' }],
-      },
-    ]);
+    const res = await fetch(`${API_BASE}/api/transcribe`, {
+      method: "POST",
+      body: formData,
+    });
 
-    setIsLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/voice`, {
-        method: "POST",
-        body: formData,
-      });
+    if (!res.ok) throw new Error("Transcription failed");
 
-      if (!res.ok) {
-        const errorData = await res.text();
-        console.error("Voice API error:", errorData);
-        throw new Error("Voice processing failed");
-      }
+    const data = await res.json();
 
-      // Read the audio blob FIRST before trying to read headers
-      const blob = await res.blob();
+    setInput(data.text || "");
 
-      const userTextRaw = res.headers.get("X-User-Text");
-      const assistantTextRaw = res.headers.get("X-Assistant-Text");
-
-      const userText = userTextRaw ? decodeURIComponent(userTextRaw) : "Voice Message";
-      const assistantText = assistantTextRaw ? decodeURIComponent(assistantTextRaw) : "Audio response";
-
-      setMessages(prev => {
-        const newMessages = [...prev];
-        newMessages[newMessages.length - 1] = {
-          id: crypto.randomUUID(),
-          role: 'user',
-          parts: [{ type: 'text', text: `🎙️ ${userText}` }],
-        };
-        newMessages.push({
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          parts: [{ type: 'text', text: assistantText }],
-        });
-        return newMessages;
-      });
-
-      const audioUrl = URL.createObjectURL(blob);
-      const audio = new Audio(audioUrl);
-      audio.play();
-
-      refreshSidebar();
-    } catch (err) {
-      console.error("Voice submit error:", err);
-      setMessages(prev => {
-        const newMessages = [...prev];
-        newMessages[newMessages.length - 1] = {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          parts: [{ type: 'text', text: '❌ Voice processing failed. Please try again or type your question.' }],
-        };
-        return newMessages;
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  } catch (err) {
+    console.error(err);
+    setInput("");
+  } finally {
+    setIsProcessingAudio(false);
+  }
+};
 
   // Send message
   const handleSubmit = async ({ text }: { text?: string }) => {
@@ -258,7 +270,8 @@ export default function ChatBotDemo() {
         body: JSON.stringify({
           chatId,
           userId,
-          text: userText
+          text: userText,
+          language: language,
         }),
       });
 
@@ -290,6 +303,7 @@ export default function ChatBotDemo() {
   const handleSuggestionClick = (suggestion: string) => {
     handleSubmit({ text: suggestion });
   };
+  
 
   // Load chat
   const handleChatSelect = async (chatId: string) => {
@@ -310,19 +324,19 @@ export default function ChatBotDemo() {
   };
 
   //  Feedback
-  const submitFeedback = async () => {
-    if (!feedback.trim()) return;
-    setSubmitting(true);
+  // const submitFeedback = async () => {
+  //   if (!feedback.trim()) return;
+  //   setSubmitting(true);
 
-    await fetch(`${API_BASE}/api/feedback`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ feedback }),
-    });
+  //   await fetch(`${API_BASE}/api/feedback`, {
+  //     method: "POST",
+  //     headers: { "Content-Type": "application/json" },
+  //     body: JSON.stringify({ feedback }),
+  //   });
 
-    setFeedback("");
-    setSubmitting(false);
-  };
+  //   setFeedback("");
+  //   setSubmitting(false);
+  // };
 
   // New chat
   const handleNewChat = () => {
@@ -331,6 +345,16 @@ export default function ChatBotDemo() {
     setMessages([]);
     refreshSidebar();
   };
+   // Auth Guard
+  useEffect(() => {
+    if (!loading && !user) {
+      router.push("/login");
+    }
+  }, [user, loading, router]);
+
+  const refreshSidebar = useCallback(() => {
+    setRefreshCounter(prev => prev + 1);
+  }, []);
 
   if (loading || !user) {
     return (
@@ -369,6 +393,8 @@ export default function ChatBotDemo() {
   </Button>
 </div>
 
+          
+          {/* Theme toggle */}
     
    <ChatSidebar
   userId={userId}   //  pass down
@@ -380,15 +406,7 @@ export default function ChatBotDemo() {
   collapsed={!sidebarOpen}
 />
   </div>
-
-  {/* Chat Area */}
-  <div className="flex-1 relative size-full h-screen">
-        <div className="flex flex-col h-full">
-
-          <h1 className="text-6xl font-bold">
-            V<AuroraText>BOT</AuroraText>
-          </h1>
-          <DropdownMenu>
+  <DropdownMenu>
   <DropdownMenuTrigger asChild>
     <Button variant="outline" className="fixed top-4 right-15 z-50 capitalize gap-2 font-medium bg-background border-border/60 hover:bg-muted/30">
       <span className="text-[11px] px-1.5 py-0.5 rounded-sm bg-muted/80 text-muted-foreground font-semibold uppercase">{user.role}</span>
@@ -406,15 +424,31 @@ export default function ChatBotDemo() {
     >
       Logout Session
     </DropdownMenuItem>
+
+
+
+
+
+
   </DropdownMenuContent>
 </DropdownMenu>
+  
+
+  {/* Chat Area */}
+  <div className="flex-1 relative size-full h-screen">
+        <div className="flex flex-col h-full">
+
+          <h1 className="text-6xl font-bold ml-5 ">
+            V<AuroraText>BOT</AuroraText>
+          </h1>
+       
           {/* Theme toggle */}
           <div className="fixed top-4 right-4 z-50">
             <AnimatedThemeToggler />
           </div>
 
           {/* Feedback Dialog */}
-          <Dialog>
+          {/* <Dialog>
             <DialogTrigger asChild>
               <Button variant="outline" className="absolute right-1 top-8">
                 Feedback
@@ -438,14 +472,14 @@ export default function ChatBotDemo() {
                 </Button>
               </DialogFooter>
             </DialogContent>
-          </Dialog>
+          </Dialog> */}
 
           {/* Conversation */}
           <Conversation className="h-full mt-8">
             <ConversationContent>
 
               {/* Suggestions */}
-              <Suggestions className="mt-4">
+              <Suggestions className="mt-4 ml-5">
                 {suggestions.map(s => (
                   <Suggestion
                     key={s}
@@ -487,7 +521,7 @@ export default function ChatBotDemo() {
   </div>
 ))}
 
-              {(status === 'submitted' || isLoading) && <Loader />}
+              {(status === 'submitted' || isLoading ) && <Loader />}
 
             </ConversationContent>
 
@@ -495,17 +529,23 @@ export default function ChatBotDemo() {
           </Conversation>
 
           {/* Input */}
-          <PromptInput onSubmit={handleSubmit} className="mt-4">
+          <PromptInput onSubmit={handleSubmit} className="mt-4 ml-5">
             <PromptInputBody>
               <ShineBorder />
               <PromptInputTextarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder={
-                  activeChatId
-                    ? "Type your message..."
-                    : "Start a new chat..."
-                }
+  isRecording
+    ? "🎙️ Recording..."
+    : isProcessingAudio
+      ? "⏳ Processing audio..."
+      : isListening
+        ? "🎧 Listening..."
+        : activeChatId
+          ? "Type your message..."
+          : "Start a new chat..."
+}
               />
             </PromptInputBody>
 
@@ -532,8 +572,44 @@ export default function ChatBotDemo() {
                     <MicOff className="w-5 h-5" />
                   </Button>
                 )}
+                
                 <PromptInputSubmit disabled={!input.trim() || isLoading} />
               </div>
+              <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline">
+          <Languages className="h-4 w-4" />
+          Language
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent className="w-48">
+        <DropdownMenuLabel>Select Language</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuRadioGroup onValueChange={setLanguage} value={language}>
+          <DropdownMenuRadioItem value="en">
+            <span className="flex items-center gap-2">
+              <span>English</span>
+            </span>
+          </DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="Hindi">
+            <span className="flex items-center gap-2">
+              <span>हिंदी</span>
+            </span>
+          </DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="Tamil">
+            <span className="flex items-center gap-2">
+              <span>தமிழ்</span>
+            </span>
+          </DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="Telugu">
+            <span className="flex items-center gap-2">
+              <span>దేశం</span>
+            </span>
+          </DropdownMenuRadioItem>
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+              
             </PromptInputFooter>
           </PromptInput>
 
