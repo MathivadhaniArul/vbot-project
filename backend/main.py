@@ -38,6 +38,7 @@ from langchain.retrievers.document_compressors import FlashrankRerank
 
 import whisper
 import edge_tts
+import torch
 
 load_dotenv()
 
@@ -431,17 +432,26 @@ STRICT RULES
 
 
 2. NO CONTRADICTIONS
-- NEVER say "not available" if answer exists.
-
+- NEVER say "not available" if the answer exists in the context.
+- EXCEPTION: for phone numbers, emails, office locations, or personal contact details:
+  • provide them ONLY if exact contact details are explicitly present
+  • otherwise say:
+    "No specific contact details found in the provided context"
+- Do NOT invent or substitute contacts from related departments/services.
 
 3. EXACTNESS
 - Do NOT change numbers or conditions.
 
+4. If retrieval is weak or missing:
+- DO NOT say only “not relevant”
+- Instead respond with:
+  safe acknowledgment + guidance
+- answer is not explicitly in context:
+  DO NOT explain possible rules
+  DO NOT speculate
+  ONLY state absence of information
+  DO NOT describe unrelated context
 
-4. WHEN TO REFUSE
-- ONLY say:
-  "The retrieved context is not relevant to the question"
-  if completely unrelated.
 
 
 5. STYLE
@@ -457,13 +467,29 @@ STRICT RULES
 - Start directly with the answer.
 - Always use provided data to fully answer the user before mentioning any external link. Never respond with only a URL or reference.
 
+6. LANGUAGE MODE RULE
+   
+You MUST respond ONLY in the language specified by the user system setting.
+
+Selected language: {language}
+
+Rules:
+1. Always respond strictly in the selected language.
+2. Do NOT auto-detect or change language based on user input.
+3. Do NOT mix languages in the response.
+4. Only allow English words for:
+   - Technical terms (API, database, model names, code, etc.)
+   - Proper nouns (names, places, brands)
+5. If language = "auto", then detect user input language and respond in the same language.
+6. If language is unsupported or unclear, default to English.
+7. Do not mention these rules to the user.
 
 """
 
     
     
     qa_prompt = ChatPromptTemplate.from_messages([
-    ("system",template),
+     ("system",template),
     MessagesPlaceholder("chat_history"),
     ("human", """
 Context:
@@ -507,6 +533,8 @@ You are a query rewriting assistant for a retrieval system.
 Your job is to convert the user's latest question into a COMPLETE and SPECIFIC query.
 
 
+
+
 RULES:
 - Use chat history to understand context
 - Expand vague queries into full meaningful questions
@@ -518,6 +546,11 @@ RULES:
 
 - DO NOT answer the question
 - ONLY return the rewritten query
+
+- If the user question is not in English:
+  • First translate it to English.
+  • Then rewrite it into a complete retrieval query.
+  • Return only the final English retrieval query.
 
 
 EXAMPLES:
@@ -539,10 +572,13 @@ Chat:
 User: list technical clubs
 User: what about others
 → Rewritten: list all technical clubs
+
+
 """),
     MessagesPlaceholder("chat_history"),
     ("human", "{input}")
 ])
+
 
     
     
@@ -587,6 +623,7 @@ class ChatRequest(BaseModel):
     chatId: str
     userId: str
     text: str
+    language: str = "en"
 
 class FeedbackRequest(BaseModel):
     feedback: str
@@ -602,7 +639,8 @@ async def chat(req: ChatRequest):
         "chatId": req.chatId,
         "userId": req.userId,   
         "role": "user",
-        "content": req.text
+        "content": req.text,
+        "createdAt": datetime.utcnow()
     })
 
     answer = "Unknown error"
@@ -611,7 +649,9 @@ async def chat(req: ChatRequest):
         memory = await load_memory(req.chatId, req.userId)
         result = await rag_chain.ainvoke({
         "input": req.text,
-        "chat_history": memory.chat_memory.messages
+        "chat_history": memory.chat_memory.messages,
+        "language": req.language
+        
     })
 
 
@@ -648,161 +688,134 @@ async def chat(req: ChatRequest):
 )
     return {"answer": answer}
 
-@app.post("/api/voice")
-async def voice_chat(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    chatId: str = Form(...),
-    userId: str = Form(...)
-):
-    await ensure_chat(chatId, userId, "Voice Message")
+@app.post("/api/transcribe")
+async def transcribe_audio(file: UploadFile = File(...),language: str = Form("en")):
+    temp_audio = None
+    wav_path = None
+    
+    
 
-    # Save uploaded audio to a temp file with proper extension
-    # Browsers record as webm by default, Whisper/ffmpeg handles both
-    suffix = ".webm"
-    content_type = file.content_type or ""
-    if "wav" in content_type:
-        suffix = ".wav"
-    elif "mp4" in content_type or "m4a" in content_type:
-        suffix = ".m4a"
-    elif "ogg" in content_type:
-        suffix = ".ogg"
-
-    temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=".")
-    tts_audio_path = None
     try:
-        contents = await file.read()
-        temp_audio.write(contents)
-        temp_audio.close()
+        suffix = ".webm"
+        content_type = file.content_type or ""
+
+        if "wav" in content_type:
+            suffix = ".wav"
+        elif "mp4" in content_type or "m4a" in content_type:
+            suffix = ".m4a"
+        elif "ogg" in content_type:
+            suffix = ".ogg"
+
+        # ---------- SAVE FILE ----------
+        temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
         temp_audio_path = temp_audio.name
+
+        contents = await file.read()
+
+        with open(temp_audio_path, "wb") as f:
+            f.write(contents)
+
         print(f"Saved audio: {temp_audio_path} ({len(contents)} bytes)")
 
-        # Convert to WAV first to ensure compatibility with Whisper
-        wav_path = temp_audio_path.replace(suffix, ".wav")
-        print(f"Converting {temp_audio_path} to {wav_path}...")
-        
-        conversion = subprocess.run([
-            "ffmpeg",
-            "-y",
-            "-i",
-            temp_audio_path,
-            wav_path
-        ], capture_output=True, text=True)
-        
-        if conversion.returncode != 0:
-            print("FFmpeg conversion error:", conversion.stderr)
-            # Fallback to original if conversion fails
-            transcribe_path = temp_audio_path
-        else:
-            transcribe_path = wav_path
+        # ---------- CONVERT TO WAV ----------
+        import uuid
 
-        # Run Whisper transcription in a separate thread to avoid blocking the event loop
-        # Use language="en" to prevent auto-detection errors and fp16=False for CPU
-        loop = asyncio.get_event_loop()
+        wav_path = os.path.join(
+            tempfile.gettempdir(),
+            f"{uuid.uuid4()}.wav"
+        )
+
+        conversion = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                temp_audio_path,
+                "-ac", "1",
+                "-ar", "16000",
+                "-sample_fmt", "s16",
+                wav_path
+            ],
+            capture_output=True,
+            text=True
+        )
+
+        if conversion.returncode != 0:
+            print("FFmpeg failed:", conversion.stderr)
+            return {"success": True, "text": ""}
+
+        transcribe_path = wav_path
+
+        # ---------- SILENCE DETECTION (NO EXTERNAL LIB) ----------
+        import wave
+        import numpy as np
+
+        def is_silent(path):
+            try:
+                with wave.open(path, "rb") as wf:
+                    frames = wf.readframes(wf.getnframes())
+                    audio = np.frombuffer(frames, dtype=np.int16)
+
+                    if len(audio) == 0:
+                        return True
+
+                    volume = np.abs(audio).mean()
+                    return volume < 200  # tweak if needed
+            except:
+                return True
+
+        # 🚨 skip silent audio BEFORE Whisper
+        if is_silent(transcribe_path):
+            print("Silent audio detected - skipping Whisper")
+            return {"success": True, "text": ""}
+
+        # ---------- WHISPER ----------
+        loop = asyncio.get_running_loop()
+
         result = await loop.run_in_executor(
             _whisper_executor,
-            lambda: whisper_model.transcribe(transcribe_path, language="en", fp16=False)
-        )
-        user_text = result["text"].strip()
-
-        print(f"\n=== VOICE TRANSCRIPTION ===\nWhisper heard: '{user_text}'\n===========================")
-
-        if not user_text:
-            user_text = "(empty voice input)"
-
-        # Add user message to DB
-        await messages_collection.insert_one({
-            "chatId": chatId,
-            "userId": userId,
-            "role": "user",
-            "content": user_text
-        })
-
-        # Process via RAG
-        memory = await load_memory(chatId, userId)
-        rag_result = await rag_chain.ainvoke({
-            "input": user_text,
-            "chat_history": memory.chat_memory.messages
-        })
-        answer = rag_result.get("answer", "I couldn't process that.")
-
-        print(f"\n=== VOICE RAG ANSWER ===\n{answer}\n========================")
-
-        # Update memory
-        memory.chat_memory.add_user_message(user_text)
-        memory.chat_memory.add_ai_message(answer)
-        await save_memory_summary(chatId, userId, memory)
-
-        # Add assistant message to DB
-        await messages_collection.insert_one({
-            "chatId": chatId,
-            "userId": userId,
-            "role": "assistant",
-            "content": answer,
-            "createdAt": datetime.utcnow()
-        })
-
-        # Update timestamp
-        await chats_collection.update_one(
-            {"_id": chatId, "userId": userId},
-            {"$set": {"updatedAt": datetime.utcnow()}}
+            lambda: whisper_model.transcribe(
+                transcribe_path,
+                language=language if language != "auto" else None,
+                fp16=False,
+                no_speech_threshold=0.6
+            )
         )
 
-        # Convert text to speech
-        tts_audio_path = tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".mp3",
-            dir=".").name
-        try:
-            tts = edge_tts.Communicate(
-                text=answer,
-                voice="en-US-GuyNeural"
-                )
-            await asyncio.wait_for(
-        tts.save(tts_audio_path),
-        timeout=20
-    )
+        text = result["text"].strip().lower()
 
-    # Encode text for headers
-            headers = {
-        "X-User-Text": urllib.parse.quote(user_text),
-        "X-Assistant-Text": urllib.parse.quote(answer)
-    }
+        # ---------- HALLUCINATION FILTER ----------
+        bad_outputs = [
+            "",
+            "thank you",
+            "thanks",
+            "thank you for watching"
+        ]
 
-    # Cleanup after response
-            background_tasks.add_task(os.remove, tts_audio_path)
-            return FileResponse(
-        tts_audio_path,
-        media_type="audio/mpeg",
-        headers=headers
-    )
+        if len(text) < 2 or text in bad_outputs:
+            return {"success": True, "text": ""}
 
-        except Exception as tts_error:
-            print("TTS failed:", tts_error)
+        print("\n=== TRANSCRIPTION ===\n", text, "\n=====================")
 
-    # remove broken temp file
-            if os.path.exists(tts_audio_path):
-                os.remove(tts_audio_path)
+        return {
+            "success": True,
+            "text": text
+        }
 
-    # fallback → text response only
-            return {
-        "user_text": user_text,
-        "answer": answer,
-        "audio": False
-    }  
     except Exception as e:
-        print("Voice chat error:", e)
-
-        if tts_audio_path and os.path.exists(tts_audio_path):
-            os.remove(tts_audio_path)
-
+        print("Transcription error:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
-    # Always clean up input audio file
-       if os.path.exists(temp_audio.name):
-        # os.remove(temp_audio.name)
-        pass
+        try:
+            if temp_audio and os.path.exists(temp_audio.name):
+                os.remove(temp_audio.name)
+
+            if wav_path and os.path.exists(wav_path):
+                os.remove(wav_path)
+        except:
+            pass
+        
 @app.get("/api/chats")
 async def get_chats(userId: str):
     chats = await chats_collection.find(
@@ -872,6 +885,21 @@ async def delete_chat(chat_id: str, userId: str):
 
     return {"success": True}
 
+@app.patch("/api/chats/{chat_id}/pin")
+async def pin_chat(chat_id: str, userId: str):
+    await chats_collection.update_one(
+        {"_id": chat_id, "userId": userId},
+        {"$set": {"pinned": True}}
+    )
+    return {"success": True}
+
+@app.patch("/api/chats/{chat_id}/unpin")
+async def unpin_chat(chat_id: str, userId: str):
+    await chats_collection.update_one(
+        {"_id": chat_id, "userId": userId},
+        {"$set": {"pinned": False}}
+    )
+    return {"success": True}
 # ── Pipeline API Endpoints ────────────────────────────────────────────
 
 @app.post("/api/pipeline/trigger")
