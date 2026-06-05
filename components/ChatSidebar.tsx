@@ -11,14 +11,18 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { MoreVertical, Trash2, Pencil, MessageSquarePlus } from "lucide-react";
 import { cn } from "@/lib/models/utils";
+import {
+  Pin,
+  PinOff
+} from "lucide-react";
 
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+const API_BASE = "http://127.0.0.1:8000";
 
 interface Chat {
   _id: string;
   title: string;
   updatedAt: string;
+  pinned?: boolean;
 }
 
 export default function ChatSidebar({
@@ -121,6 +125,134 @@ const handleRenameChat = async (chatId: string) => {
   }
 };
 
+const pinnedChats = chats
+  .filter(c => c.pinned)
+  .sort(
+    (a, b) =>
+      new Date(b.updatedAt).getTime() -
+      new Date(a.updatedAt).getTime()
+  );
+
+const regularChats = chats
+  .filter(c => !c.pinned)
+  .sort(
+    (a, b) =>
+      new Date(b.updatedAt).getTime() -
+      new Date(a.updatedAt).getTime()
+  );
+
+  const handlePinChat = async (
+  chatId: string,
+  currentlyPinned: boolean
+) => {
+  try {
+    const endpoint = currentlyPinned
+      ? "unpin"
+      : "pin";
+
+    const res = await fetch(
+      `${API_BASE}/api/chats/${chatId}/${endpoint}?userId=${userId}`,
+      {
+        method: "PATCH",
+      }
+    );
+
+    if (!res.ok) throw new Error();
+
+    setChats(prev =>
+      prev.map(chat =>
+        chat._id === chatId
+          ? {
+              ...chat,
+              pinned: !currentlyPinned,
+            }
+          : chat
+      )
+    );
+  } catch (err) {
+    console.error(err);
+  }
+};
+const ChatRow = ({ chat }: { chat: Chat }) => (
+  <div
+    onClick={() => onChatSelect(chat._id)}
+    className={`flex items-center gap-2 p-2 mb-1 rounded-md hover:bg-muted cursor-pointer overflow-hidden ${
+      activeChatId === chat._id ? "bg-muted" : ""
+    } ${collapsed ? "justify-center" : ""}`}
+  >
+    <div className="flex-shrink-0">
+      <MessageSquarePlus className="w-4 h-4" />
+    </div>
+
+    {!collapsed && (
+      <div className="flex-1 min-w-0 max-w-[160px] pr-2">
+        <p className="truncate text-sm">
+          {chat.title || "New conversation"}
+        </p>
+      </div>
+    )}
+
+    {!collapsed && (
+      <div className="flex-shrink-0">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="w-8 h-8"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <MoreVertical className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              onClick={(e) => {
+                e.stopPropagation();
+                handleRenameChat(chat._id);
+              }}
+            >
+              <Pencil className="mr-2 h-4 w-4" />
+              Rename
+            </DropdownMenuItem>
+
+            <DropdownMenuItem
+              onClick={(e) => {
+                e.stopPropagation();
+                handlePinChat(chat._id, !!chat.pinned);
+              }}
+            >
+              {chat.pinned ? (
+                <>
+                  <PinOff className="mr-2 h-4 w-4" />
+                  Unpin
+                </>
+              ) : (
+                <>
+                  <Pin className="mr-2 h-4 w-4" />
+                  Pin
+                </>
+              )}
+            </DropdownMenuItem>
+
+            <DropdownMenuItem
+              onClick={(e) => {
+                e.stopPropagation();
+                handleDeleteChat(chat._id);
+              }}
+              className="text-red-600"
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    )}
+  </div>
+);
+
   return (
     <div
       className={cn(
@@ -160,72 +292,28 @@ const handleRenameChat = async (chatId: string) => {
       <div className="text-center py-8 text-muted-foreground">
         No conversations yet
       </div>
-    ) : (
-      chats.map(chat => (
-        <div
-          key={chat._id}
-          onClick={() => onChatSelect(chat._id)}
-          className={`flex items-center gap-2 p-2 mb-1 rounded-md hover:bg-muted cursor-pointer overflow-hidden ${
-            activeChatId === chat._id ? "bg-muted" : ""
-          } ${collapsed ? "justify-center" : ""}`}
-        >
-          {/* Chat icon */}
-          <div className="flex-shrink-0">
-            <MessageSquarePlus className="w-4 h-4" />
-          </div>
+    ) : (<>
+  {pinnedChats.length > 0 && !collapsed && (
+    <div className="px-2 py-2 text-xs font-semibold text-muted-foreground uppercase">
+       Pinned
+    </div>
+  )}
 
-          {/* Title */}
-          {!collapsed && (
-            <div className="flex-1 min-w-0 max-w-[160px] pr-2">
-              <p className="truncate text-sm">
-                {chat.title || "New conversation"}
-              </p>
-            </div>
-          )}
+  {pinnedChats.map(chat => (
+    <ChatRow key={chat._id} chat={chat} />
+  ))}
 
-          {/* Menu */}
-          {!collapsed && (
-            <div className="flex-shrink-0">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="w-8 h-8"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <MoreVertical className="h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
+  {regularChats.length > 0 && !collapsed && (
+    <div className="px-2 py-2 mt-3 text-xs font-semibold text-muted-foreground uppercase">
+      Chats
+    </div>
+  )}
 
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleRenameChat(chat._id);
-                    }}
-                  >
-                    <Pencil className="mr-2 h-4 w-4" />
-                    Rename
-                  </DropdownMenuItem>
-
-                  <DropdownMenuItem
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDeleteChat(chat._id);
-                    }}
-                    className="text-red-600"
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    Delete
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          )}
-        </div>
-      ))
-    )}
+  {regularChats.map(chat => (
+    <ChatRow key={chat._id} chat={chat} />
+  ))}
+</>)
+    }
   </div>
 </ScrollArea>
     </div>
