@@ -90,7 +90,7 @@ rag_chain = None
 memory = None
 chat_memories = {}
 
-ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11435")
 if not os.path.exists("/.dockerenv") and "host.docker.internal" in ollama_url:
     ollama_url = "http://localhost:11434"
 
