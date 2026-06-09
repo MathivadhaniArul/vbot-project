@@ -13,6 +13,8 @@ import subprocess
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+from router import route_query
+from mongo_retriever import fetch_mongo_docs
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
@@ -647,22 +649,69 @@ async def chat(req: ChatRequest):
 
     try:
         memory = await load_memory(req.chatId, req.userId)
+
+        # ── Step 1: route ────────────────────────────────────
+        routing = await route_query(req.text)
+        sources = routing.get("sources", ["qdrant"])
+        print(f"[router] {sources} ← {routing.get('reason')}")
+
+        # ── Step 2: parallel fetch ────────────────────────────
+        tasks = []
+        if "mongodb" in sources:
+            tasks.append(fetch_mongo_docs(req.text))
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            mongo_docs = results[0] if not isinstance(results[0], Exception) else []
+        else:
+            mongo_docs = []
+
+        # ── Step 3: format extra context ─────────────────────
+        extra_context = ""
+        if mongo_docs:
+            parts = [f"[MONGODB]\n{d.page_content}" for d in mongo_docs]
+            extra_context = "\n\n".join(parts)
+
+        # ── Step 4: invoke rag_chain ─────────────────────────
+        # if only mongodb → skip qdrant by passing empty input trick
+        invoke_input = req.text
+        if "qdrant" not in sources:
+            invoke_input = f"CONTEXT ONLY FROM DB:\n{extra_context}\n\nQuestion: {req.text}"
+            extra_context = ""  # already embedded above
+
         result = await rag_chain.ainvoke({
-        "input": req.text,
-        "chat_history": memory.chat_memory.messages,
-        "language": req.language
-        
-    })
+            "input": invoke_input,
+            "chat_history": memory.chat_memory.messages,
+            "language": req.language,
+            # extra_context injected via system prompt below if present
+        })
+
+        # ── Step 5: prepend mongo context to answer if both ──
+        answer = result.get("answer", "No answer returned")
+        if extra_context and "qdrant" in sources:
+            # re-invoke with merged context
+            merged_input = f"""Additional records from database:
+{extra_context}
+
+Original question: {req.text}"""
+            result2 = await rag_chain.ainvoke({
+                "input": merged_input,
+                "chat_history": memory.chat_memory.messages,
+                "language": req.language,
+            })
+            answer = result2.get("answer", answer)
+
+
 
 
         answer = result.get("answer", "No answer returned")
+
 
         #  update memory
         memory.chat_memory.add_user_message(req.text)
         memory.chat_memory.add_ai_message(answer)
 
-        await save_memory_summary(req.chatId, req.userId, memory)
 
+        await save_memory_summary(req.chatId, req.userId, memory)
     except Exception as e:
         print("Chat error:", e)
         answer = f"Error: {str(e)}"
