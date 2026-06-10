@@ -18,7 +18,9 @@ import {
 
 import { Message, MessageContent } from '@/components/ai-elements/message';
 import { Response } from '@/components/ai-elements/response';
-import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen, Bell } from "lucide-react";
+import ReminderButtons from '@/components/ReminderButtons';
+import NotificationPanel from '@/components/NotificationPanel';
 
 import {
   PromptInput,
@@ -58,8 +60,7 @@ import { Languages } from "lucide-react"
 
 
 
-const API_BASE = "http://localhost:8000";
-//const API_BASE =process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 const suggestions = [
   "when absolute grading is adopted ?",
   "what is the FAT re-evaluation procedure?",
@@ -71,16 +72,42 @@ export default function ChatBotDemo() {
   const [refreshCounter, setRefreshCounter] = useState(0);
   const router = useRouter();
   const { user, loading, logout } = useAuth();
+  const userId = user?.username || "";
   //const [feedback, setFeedback] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  //const [userId, setUserId] = useState("user1");
   const [language, setLanguage] = useState("en");
+  const [notifCount, setNotifCount] = useState(0);
+  const [notifPanelOpen, setNotifPanelOpen] = useState(false);
+
+  // Fetch unread count helper
+  const fetchUnreadCount = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/notifications?userId=${userId}`);
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      if (data.success) {
+        const unread = data.notifications.filter((n: any) => !n.read).length;
+        setNotifCount(unread);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  }, [userId]);
+
+  // Initial fetch on mount / user change
+  useEffect(() => {
+    if (userId) {
+      fetchUnreadCount();
+      const interval = setInterval(fetchUnreadCount, 30000);
+      return () => clearInterval(interval);
+    }
+  }, [userId, fetchUnreadCount]);
 
   const { messages, setMessages, status } = useChat();
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const userId = user?.username || "";
 
  
 
@@ -283,6 +310,8 @@ const startVAD = (stream: MediaStream) => {
           id: crypto.randomUUID(),
           role: 'assistant',
           parts: [{ type: 'text', text: data.answer }],
+          entities: data.entities,
+          actions: data.actions,
         },
       ]);
 
@@ -319,6 +348,8 @@ const startVAD = (stream: MediaStream) => {
         id: m.id || m._id || `msg-${index}`,
         role: m.role,
         parts: [{ type: "text", text: m.content }],
+        entities: m.entities || [],
+        actions: m.actions || [],
       }))
     );
   };
@@ -406,6 +437,21 @@ const startVAD = (stream: MediaStream) => {
   collapsed={!sidebarOpen}
 />
   </div>
+
+  <Button
+    variant="outline"
+    size="icon"
+    onClick={() => setNotifPanelOpen(true)}
+    className="fixed top-4 right-52 z-50 rounded-full bg-background border-border/60 hover:bg-muted/30 h-10 w-10 flex items-center justify-center cursor-pointer"
+  >
+    <Bell className="w-5 h-5 text-foreground" />
+    {notifCount > 0 && (
+      <span className="absolute -top-1 -right-1 min-w-5 h-5 bg-red-500 text-white rounded-full flex items-center justify-center text-[10px] font-bold px-1 animate-pulse">
+        {notifCount}
+      </span>
+    )}
+  </Button>
+
   <DropdownMenu>
   <DropdownMenuTrigger asChild>
     <Button variant="outline" className="fixed top-4 right-15 z-50 capitalize gap-2 font-medium bg-background border-border/60 hover:bg-muted/30">
@@ -498,6 +544,15 @@ const startVAD = (stream: MediaStream) => {
           <Message from={message.role}>
             <MessageContent>
               <Response>{part.text}</Response>
+              {message.role === "assistant" && (message as any).entities && (message as any).entities.map((ent: any, idx: number) => (
+                <ReminderButtons
+                  key={idx}
+                  userId={userId}
+                  entity={ent}
+                  chatId={activeChatId || ""}
+                  onSuccess={fetchUnreadCount}
+                />
+              ))}
             </MessageContent>
           </Message>
         )}
@@ -615,6 +670,12 @@ const startVAD = (stream: MediaStream) => {
 
         </div>
       </div>
+      <NotificationPanel
+        userId={userId}
+        isOpen={notifPanelOpen}
+        onClose={() => setNotifPanelOpen(false)}
+        onUnreadCountChange={setNotifCount}
+      />
     </main>
   );
 }

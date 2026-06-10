@@ -1,5 +1,19 @@
 import uuid
 import os
+import socket
+from dotenv import load_dotenv
+
+# Force IPv4 to prevent IPv6 DNS resolution timeouts for Google Calendar APIs
+orig_getaddrinfo = socket.getaddrinfo
+def patched_getaddrinfo(*args, **kwargs):
+    responses = orig_getaddrinfo(*args, **kwargs)
+    return [r for r in responses if r[0] == socket.AF_INET]
+socket.getaddrinfo = patched_getaddrinfo
+
+# Load environment variables first so all imported modules can access them
+load_dotenv()
+
+
 import uvicorn
 import re
 import json
@@ -22,7 +36,6 @@ from fastapi.background import BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from motor.motor_asyncio import AsyncIOMotorClient
-from dotenv import load_dotenv
 
 # LangChain
 from langchain_core.documents import Document
@@ -41,8 +54,6 @@ from langchain.retrievers.document_compressors import FlashrankRerank
 import whisper
 import edge_tts
 import torch
-
-load_dotenv()
 
 # ── Logging Configuration ─────────────────────────────────────────────
 logging.basicConfig(
@@ -87,10 +98,11 @@ app.add_middleware(
 
 retrieval_chain = None
 rag_chain = None
+question_answer_chain = None
 memory = None
 chat_memories = {}
 
-ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11435")
+ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 if not os.path.exists("/.dockerenv") and "host.docker.internal" in ollama_url:
     ollama_url = "http://localhost:11434"
 
@@ -174,6 +186,24 @@ def hash_text(text: str):
 def clean_text(text: str):
     text = re.sub(r'(\*\*|__)', '', text)
     return text.strip()
+
+
+def sanitize_misleading_wording(text: str) -> str:
+    import re
+    text = re.sub(r'\bis scheduled for\b', 'takes place on', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bhas been scheduled for\b', 'takes place on', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bscheduled for\b', 'on', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bI have noted this down\b', 'I found the event details', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bI have noted it down\b', 'I found the event details', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bnoted down\b', 'found', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bnote this down\b', 'view this event', text, flags=re.IGNORECASE)
+    text = re.sub(r'\breminder set\b', 'reminder option', text, flags=re.IGNORECASE)
+    text = re.sub(r'\badded to calendar\b', 'can be added to your calendar', text, flags=re.IGNORECASE)
+    text = re.sub(r'\badded to your calendar\b', 'can be added to your calendar', text, flags=re.IGNORECASE)
+    text = re.sub(r'\byour reminder has been set\b', 'you can set your reminder below', text, flags=re.IGNORECASE)
+    text = re.sub(r'\byour event is scheduled\b', 'your event takes place', text, flags=re.IGNORECASE)
+    return text
+
 
 
 def split_markdown_with_subsections(md_text):
@@ -268,7 +298,7 @@ async def ensure_chat(chat_id: str, user_id: str, first_message: str):
 
 @app.on_event("startup")
 def startup():
-    global retrieval_chain, memory,rag_chain
+    global retrieval_chain, memory, rag_chain, question_answer_chain
 
     # print("Building RAG pipeline...")
 
@@ -486,6 +516,31 @@ Rules:
 6. If language is unsupported or unclear, default to English.
 7. Do not mention these rules to the user.
 
+7. STRUCTURED RESPONSE RULE
+
+You MUST respond in JSON format.
+Your output must match the following JSON Schema:
+{{
+  "answer": "Your detailed conversational answer in the selected language",
+  "entities": [
+    {{
+      "type": "event | exam | assignment | fee | project_submission",
+      "name": "Name of the event / exam / assignment / deadline",
+      "date": "Date-time string, prefer ISO format YYYY-MM-DDTHH:MM:SS+05:30. Defaults to 10:00 AM if time not specified.",
+      "confidence": 0.0 to 1.0 representing how certain the date is,
+      "timezone": "Asia/Kolkata"
+    }}
+  ],
+  "actions": [
+    {{
+      "type": "set_reminder",
+      "entity": "Name of the event (matching name in entities)"
+    }}
+  ]
+}}
+
+Only extract entities and actions if the user query or answer references a specific date-based event, exam, assignment, or deadline that is a candidate for setting a reminder. Otherwise, leave the entities and actions arrays empty.
+
 """
 
     
@@ -620,6 +675,58 @@ User: what about others
         print(f"⚠️ Pipeline scheduler failed to start: {e}")
         print("  (The chatbot will still work, just without auto-updates)")
 
+    # ── Ensure MongoDB Indexes ────────────────────────────────────────
+    try:
+        from reminder_service import ensure_indexes
+        loop = asyncio.get_event_loop()
+        loop.create_task(ensure_indexes())
+        print(" Database indexes scheduled.")
+    except Exception as e:
+        print(f"⚠️ Index creation skipped: {e}")
+
+
+def parse_llm_response(raw_text: str) -> dict:
+    raw_text = raw_text.strip()
+    
+    # Clean up markdown code blocks first
+    if "```" in raw_text:
+        block_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw_text, re.DOTALL)
+        if block_match:
+            raw_text = block_match.group(1).strip()
+            
+    # Try parsing direct JSON
+    try:
+        data = json.loads(raw_text)
+        if isinstance(data, dict) and "answer" in data:
+            return {
+                "answer": data["answer"],
+                "entities": data.get("entities", []),
+                "actions": data.get("actions", [])
+            }
+    except Exception:
+        pass
+
+    # Try extracting JSON using regex search
+    try:
+        match = re.search(r"(\{.*\})", raw_text, re.DOTALL)
+        if match:
+            data = json.loads(match.group(1))
+            if isinstance(data, dict) and "answer" in data:
+                return {
+                    "answer": data["answer"],
+                    "entities": data.get("entities", []),
+                    "actions": data.get("actions", [])
+                }
+    except Exception:
+        pass
+
+    # Fallback to returning raw text as conversational answer
+    return {
+        "answer": raw_text,
+        "entities": [],
+        "actions": []
+    }
+
 
 class ChatRequest(BaseModel):
     chatId: str
@@ -646,6 +753,8 @@ async def chat(req: ChatRequest):
     })
 
     answer = "Unknown error"
+    raw_entities = []
+    raw_actions = []
 
     try:
         memory = await load_memory(req.chatId, req.userId)
@@ -653,89 +762,189 @@ async def chat(req: ChatRequest):
         # ── Step 1: route ────────────────────────────────────
         routing = await route_query(req.text)
         sources = routing.get("sources", ["qdrant"])
-        print(f"[router] {sources} ← {routing.get('reason')}")
+        print(f"[router] {sources} <- {routing.get('reason')}")
 
-        # ── Step 2: parallel fetch ────────────────────────────
-        tasks = []
-        if "mongodb" in sources:
-            tasks.append(fetch_mongo_docs(req.text))
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            mongo_docs = results[0] if not isinstance(results[0], Exception) else []
+        if not sources:
+            result = await question_answer_chain.ainvoke({
+                "input": req.text,
+                "chat_history": memory.chat_memory.messages,
+                "context": [],
+                "language": req.language
+            })
+            if isinstance(result, dict):
+                answer = result.get("answer", "No answer returned")
+            else:
+                answer = str(result)
         else:
-            mongo_docs = []
+            # ── Step 2: parallel fetch ────────────────────────────
+            tasks = []
+            if "mongodb" in sources:
+                tasks.append(fetch_mongo_docs(req.text))
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                mongo_docs = results[0] if not isinstance(results[0], Exception) else []
+            else:
+                mongo_docs = []
 
-        # ── Step 3: format extra context ─────────────────────
-        extra_context = ""
-        if mongo_docs:
-            parts = [f"[MONGODB]\n{d.page_content}" for d in mongo_docs]
-            extra_context = "\n\n".join(parts)
+            # ── Step 3: format extra context ─────────────────────
+            extra_context = ""
+            if mongo_docs:
+                parts = [f"[MONGODB]\n{d.page_content}" for d in mongo_docs]
+                extra_context = "\n\n".join(parts)
 
-        # ── Step 4: invoke rag_chain ─────────────────────────
-        # if only mongodb → skip qdrant by passing empty input trick
-        invoke_input = req.text
-        if "qdrant" not in sources:
-            invoke_input = f"CONTEXT ONLY FROM DB:\n{extra_context}\n\nQuestion: {req.text}"
-            extra_context = ""  # already embedded above
+            # ── Step 4: invoke rag_chain ─────────────────────────
+            # if only mongodb → skip qdrant by passing empty input trick
+            invoke_input = req.text
+            if "qdrant" not in sources:
+                invoke_input = f"CONTEXT ONLY FROM DB:\n{extra_context}\n\nQuestion: {req.text}"
+                extra_context = ""  # already embedded above
 
-        result = await rag_chain.ainvoke({
-            "input": invoke_input,
-            "chat_history": memory.chat_memory.messages,
-            "language": req.language,
-            # extra_context injected via system prompt below if present
-        })
+            result = await rag_chain.ainvoke({
+                "input": invoke_input,
+                "chat_history": memory.chat_memory.messages,
+                "language": req.language,
+                # extra_context injected via system prompt below if present
+            })
 
-        # ── Step 5: prepend mongo context to answer if both ──
-        answer = result.get("answer", "No answer returned")
-        if extra_context and "qdrant" in sources:
-            # re-invoke with merged context
-            merged_input = f"""Additional records from database:
+            # ── Step 5: prepend mongo context to answer if both ──
+            answer = result.get("answer", "No answer returned")
+            if extra_context and "qdrant" in sources:
+                # re-invoke with merged context
+                merged_input = f"""Additional records from database:
 {extra_context}
 
 Original question: {req.text}"""
-            result2 = await rag_chain.ainvoke({
-                "input": merged_input,
-                "chat_history": memory.chat_memory.messages,
-                "language": req.language,
-            })
-            answer = result2.get("answer", answer)
+                result2 = await rag_chain.ainvoke({
+                    "input": merged_input,
+                    "chat_history": memory.chat_memory.messages,
+                    "language": req.language,
+                })
+                answer = result2.get("answer", answer)
 
 
 
 
-        answer = result.get("answer", "No answer returned")
+        # Parse LLM response for entities/actions (JSON extraction & fallback)
+        print("====== REMINDER PIPELINE DEBUGGING ======")
+        print(f"RAW LLM RESPONSE:\n{answer}")
+        
+        parsed_data = parse_llm_response(answer)
+        conversational_answer = parsed_data["answer"]
+        raw_entities = parsed_data["entities"]
+        raw_actions = parsed_data["actions"]
+        
+        print(f"PARSED ENTITIES (PRE-FILTER): {raw_entities}")
+        print(f"PARSED ACTIONS (PRE-FILTER): {raw_actions}")
 
+        # Deterministic Event Category & Date Validation
+        from reminder_service import parse_iso_datetime, get_now_tz, normalize_event_name
+        
+        ACADEMIC_EVENT_TYPES = [
+            "exam",
+            "assignment",
+            "fee",
+            "project_submission",
+            "registration",
+            "placement",
+            "workshop",
+            "seminar",
+            "event"
+        ]
+        
+        now = get_now_tz("Asia/Kolkata")
+        entities = []
+        actions = []
+        
+        for entity in raw_entities:
+            try:
+                # 1. Date Check: parse date and verify it is in the future
+                dt_str = entity.get("date", "")
+                if not dt_str:
+                    print(f"Skipping entity: No date found. Entity: {entity}")
+                    continue
+                dt = parse_iso_datetime(dt_str)
+                if dt <= now:
+                    print(f"Skipping entity: Date {dt} is not in the future (now: {now}).")
+                    # Historical/past event, skip
+                    continue
+                    
+                # 2. Type/Category Check: verify it is an academic event type
+                category = entity.get("type", "").lower().strip()
+                if category not in ACADEMIC_EVENT_TYPES:
+                    print(f"Skipping entity: Category '{category}' not in ACADEMIC_EVENT_TYPES.")
+                    # Not recognized type, skip
+                    continue
+                
+                print(f"Entity passed all checks: {entity}")
+                
+                # Standardize both properties in clean ISO string format
+                iso_date = dt.isoformat()
+                entity["date"] = iso_date
+                entity["event_name"] = entity.get("name", "")
+                entity["event_date"] = iso_date
+                entity["event_type"] = entity.get("type", "")
+                entity["show_reminder"] = True
+                
+                # Keep both old and new properties to maintain compatibility
+                entities.append(entity)
+                
+                # Keep matching set_reminder actions if any (using case-insensitive & space-insensitive matching)
+                for action in raw_actions:
+                    if action.get("type") == "set_reminder":
+                        action_entity = normalize_event_name(action.get("entity", ""))
+                        entity_name = normalize_event_name(entity.get("name", ""))
+                        if action_entity == entity_name:
+                            print(f"Matching action found: {action}")
+                            actions.append(action)
+                        else:
+                            print(f"Action name mismatch: '{action_entity}' vs '{entity_name}'")
+                        
+            except Exception as exc:
+                print("Error validating entity:", exc)
+                continue
+
+        # Safeguard: if any entity is found, sanitize misleading language
+        if entities:
+            conversational_answer = sanitize_misleading_wording(conversational_answer)
 
         #  update memory
         memory.chat_memory.add_user_message(req.text)
-        memory.chat_memory.add_ai_message(answer)
-
+        memory.chat_memory.add_ai_message(conversational_answer)
 
         await save_memory_summary(req.chatId, req.userId, memory)
     except Exception as e:
         print("Chat error:", e)
-        answer = f"Error: {str(e)}"
+        conversational_answer = f"Error: {str(e)}"
+        entities = []
+        actions = []
 
     # store assistant reply
     await messages_collection.insert_one({
-    "chatId": req.chatId,
-    "userId": req.userId,  
-    "role": "assistant",
-    "content": answer,
-    "createdAt": datetime.utcnow()  
-})
+        "chatId": req.chatId,
+        "userId": req.userId,  
+        "role": "assistant",
+        "content": conversational_answer,
+        "entities": entities,
+        "actions": actions,
+        "createdAt": datetime.utcnow()  
+    })
 
     # update timestamp
     await chats_collection.update_one(
-    {
-        "_id": req.chatId,
-        "userId": req.userId   
-    },
-    {
-        "$set": {"updatedAt": datetime.utcnow()}
+        {
+            "_id": req.chatId,
+            "userId": req.userId   
+        },
+        {
+            "$set": {"updatedAt": datetime.utcnow()}
+        }
+    )
+    return {
+        "answer": conversational_answer,
+        "entities": entities,
+        "actions": actions,
+        "debug_raw_entities": raw_entities
     }
-)
-    return {"answer": answer}
 
 @app.post("/api/transcribe")
 async def transcribe_audio(file: UploadFile = File(...),language: str = Form("en")):
@@ -885,9 +1094,12 @@ async def get_messages(chatId: str, userId: str):
         {
             "id": str(m["_id"]),
             "role": m["role"],
-            "content": m["content"]
+            "content": m["content"],
+            "entities": m.get("entities", []),
+            "actions": m.get("actions", [])
         } for m in msgs
     ]
+
 
 
 @app.post("/api/feedback")
@@ -1000,6 +1212,225 @@ def shutdown():
         stop_scheduler()
     except Exception:
         pass
+
+
+# ── Reminder API Endpoints ────────────────────────────────────────────
+from reminder_service import (
+    create_reminder,
+    get_upcoming_reminders,
+    cancel_reminder,
+    get_notifications,
+    mark_notification_read,
+    snooze_reminder,
+    get_user_preference,
+    save_user_preference,
+    connect_google_oauth,
+    disconnect_google_oauth
+)
+from google_calendar import get_auth_url, create_calendar_event
+
+class ReminderCreateRequest(BaseModel):
+    userId: str
+    eventName: str
+    eventDate: str
+    sourceType: str
+    sourceId: str = None
+    notificationType: str = "in_app"
+    reminderOffset: str = "1d"
+    chatId: str = ""
+
+class SnoozeRequest(BaseModel):
+    userId: str
+    snoozeMinutes: int = 60
+
+class PreferenceSaveRequest(BaseModel):
+    userId: str
+    notificationType: str
+    email: str = None
+
+@app.post("/api/reminders")
+async def api_create_reminder(req: ReminderCreateRequest):
+    try:
+        reminder = await create_reminder(
+            user_id=req.userId,
+            event_name=req.eventName,
+            event_date_str=req.eventDate,
+            source_type=req.sourceType,
+            source_id=req.sourceId,
+            notification_type=req.notificationType,
+            reminder_offset=req.reminderOffset,
+            chat_id=req.chatId
+        )
+        is_duplicate = reminder.get("is_duplicate", False) if isinstance(reminder, dict) else False
+        return {"success": True, "reminder": reminder, "is_duplicate": is_duplicate}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/reminders/upcoming")
+async def api_get_upcoming_reminders(userId: str):
+    try:
+        reminders = await get_upcoming_reminders(userId)
+        return {"success": True, "reminders": reminders}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/reminders/{id}")
+async def api_cancel_reminder(id: str, userId: str):
+    try:
+        success = await cancel_reminder(id, userId)
+        return {"success": success}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/notifications")
+async def api_get_notifications(userId: str):
+    try:
+        notifications = await get_notifications(userId)
+        return {"success": True, "notifications": notifications}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.patch("/api/notifications/{id}/read")
+async def api_mark_notification_read(id: str, userId: str):
+    try:
+        success = await mark_notification_read(id, userId)
+        return {"success": success}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/notifications/{id}/snooze")
+async def api_snooze_reminder(id: str, req: SnoozeRequest):
+    try:
+        success = await snooze_reminder(id, req.userId, req.snoozeMinutes)
+        return {"success": success}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/user/preferences")
+async def api_get_user_preferences(userId: str):
+    try:
+        pref = await get_user_preference(userId)
+        if "_id" in pref:
+            pref["_id"] = str(pref["_id"])
+        if "created_at" in pref and isinstance(pref["created_at"], datetime):
+            pref["created_at"] = pref["created_at"].isoformat()
+        if "updated_at" in pref and isinstance(pref["updated_at"], datetime):
+            pref["updated_at"] = pref["updated_at"].isoformat()
+        return {"success": True, "preferences": pref}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/user/preferences")
+async def api_save_user_preferences(req: PreferenceSaveRequest):
+    try:
+        pref = await save_user_preference(req.userId, req.notificationType, req.email)
+        if "_id" in pref:
+            pref["_id"] = str(pref["_id"])
+        return {"success": True, "preferences": pref}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/google/auth-url")
+async def api_google_auth_url(userId: str):
+    try:
+        url = get_auth_url(userId)
+        return {"success": bool(url), "url": url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/google/callback")
+async def api_google_callback(code: str, state: str):
+    try:
+        user_id = state
+        result = await connect_google_oauth(user_id, code)
+        
+        from fastapi.responses import HTMLResponse
+        return HTMLResponse(content="""
+        <html>
+            <head>
+                <title>Google Calendar Connected</title>
+                <script>
+                    window.opener.postMessage({ type: 'GOOGLE_CALENDAR_CONNECTED', success: true }, '*');
+                    window.close();
+                </script>
+            </head>
+            <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+                <h2 style="color: #4f46e5;">Connection Successful!</h2>
+                <p>Google Calendar has been connected. You can close this window now.</p>
+            </body>
+        </html>
+        """)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/google/status")
+async def api_google_status(userId: str):
+    try:
+        pref = await get_user_preference(userId)
+        google_oauth = pref.get("google_oauth", {})
+        connected = google_oauth.get("connected", False)
+        return {"success": True, "connected": connected}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/google/disconnect")
+async def api_google_disconnect(userId: str):
+    try:
+        success = await disconnect_google_oauth(userId)
+        return {"success": success}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/google/test-event")
+async def api_google_test_event(userId: str):
+    try:
+        pref = await get_user_preference(userId)
+        if pref and "_id" in pref:
+            pref["_id"] = str(pref["_id"])
+        google_oauth = pref.get("google_oauth", {})
+        if not google_oauth or not google_oauth.get("connected"):
+            return {
+                "success": False,
+                "error": "Google Calendar not connected for this user",
+                "preferences": pref
+            }
+        
+        from datetime import datetime, timedelta
+        now = datetime.utcnow()
+        event_date = now + timedelta(hours=1)
+        
+        event_id, refreshed_tokens = create_calendar_event(
+            user_id=userId,
+            google_oauth=google_oauth,
+            event_name="VBOT Integration Test Event",
+            event_date_dt=event_date,
+            timezone="Asia/Kolkata",
+            reminder_offset_minutes=30
+        )
+        
+        if refreshed_tokens:
+            await db["user_preferences"].update_one(
+                {"user_id": userId},
+                {"$set": {"google_oauth": refreshed_tokens}}
+            )
+            
+        if event_id:
+            return {
+                "success": True,
+                "event_id": event_id,
+                "message": "Test event successfully created in Google Calendar!",
+                "refreshed_tokens_updated": bool(refreshed_tokens)
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Google Calendar event creation returned None. Check server logs."
+            }
+    except Exception as e:
+        import traceback
+        logger.error(f"Test event exception: {traceback.format_exc()}")
+        return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
 
 
 @app.get("/")

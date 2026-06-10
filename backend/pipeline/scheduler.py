@@ -88,6 +88,18 @@ def start_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
+    # Check pending reminders
+    # Every 60 seconds
+    from reminder_service import process_pending_reminders
+    _scheduler.add_job(
+        process_pending_reminders,
+        trigger="interval",
+        seconds=60,
+        id="check_reminders",
+        name="Process Pending Reminders",
+        replace_existing=True,
+    )
+
     # Event listeners for logging
     _scheduler.add_listener(_on_job_executed, EVENT_JOB_EXECUTED)
     _scheduler.add_listener(_on_job_error, EVENT_JOB_ERROR)
@@ -101,6 +113,8 @@ def start_scheduler() -> AsyncIOScheduler:
         f"  Normal:   every {NORMAL_INTERVAL_HOURS} hours "
         f"({len(__import__('pipeline.config', fromlist=['get_targets_by_schedule']).get_targets_by_schedule('normal'))} targets)"
     )
+
+    logger.info("  Reminders: check every 60s (check_reminders job registered)")
 
     return _scheduler
 
