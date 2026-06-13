@@ -7,28 +7,36 @@ load_dotenv()
 
 ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-_router_llm = ChatOllama(
-    model="llama3:8b",
-    base_url=ollama_url,
-    temperature=0
-)
+_router_llm = ChatOllama(model="qwen3:8b-q4_K_M",base_url="http://localhost:11435", temperature=0,extra_body={"think": False} )
 
 ROUTER_SYSTEM = """You are a routing agent for a VIT university chatbot.
 Decide which data source(s) to query based on the user question.
 
 Sources available:
-- "qdrant"  : regulations, fees, clubs, academic policies (vector DB)
-- "mongodb" : contact details related to counsellor, faculty, departments , committee (MongoDB)
+- "qdrant"   : regulations, fees, clubs, academic policies (vector DB)
+- "mongodb"  : contact details - counsellor, faculty, departments, committee (MongoDB)
+- "reminder" : user mentions a personal event/exam/deadline WITH a specific date AND wants to be reminded
 
 Return ONLY valid JSON, no other text:
 {"sources": ["qdrant"], "reason": "one sentence"}
 
 Rules:
-- For scheduling, setting reminders, or personal calendar event declarations (e.g., "I have my exam on...", "set a reminder for...", "my software project is on...") -> []
-- Academic rules, fees, clubs, hostel → ["qdrant"]
-- contact details → ["mongodb"]
-- Questions mixing both → ["qdrant", "mongodb"]
-- When unsure → ["qdrant"]"""
+- Pure reminder with date → ["reminder"]
+- Academic rules, fees, clubs, hostel, procedures → ["qdrant"]
+- Contact details → ["mongodb"]
+- Mixed academic + reminder → ["qdrant", "reminder"]
+- Mixed contact + reminder → ["mongodb", "reminder"]
+- Mixed academic + contact → ["qdrant", "mongodb"]
+- Mixed all three → ["qdrant", "mongodb", "reminder"]
+- When unsure → ["qdrant"]
+
+REMINDER EXAMPLES:
+- "i have chemistry exam on 18th june, set a reminder" → ["reminder"]
+- "when is the fee deadline and remind me on july 1" → ["qdrant", "reminder"]
+- "who is my counsellor and remind me to meet them on friday" → ["mongodb", "reminder"]
+- "how to get id card?" → ["qdrant"]
+- "what are the exam rules?" → ["qdrant"]
+"""
 
 async def route_query(query: str) -> dict:
     try:
