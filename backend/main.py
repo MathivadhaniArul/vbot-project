@@ -2,7 +2,7 @@ import uuid
 import os
 import socket
 from dotenv import load_dotenv
-
+from datetime import datetime, timedelta
 # Force IPv4 to prevent IPv6 DNS resolution timeouts for Google Calendar APIs
 orig_getaddrinfo = socket.getaddrinfo
 def patched_getaddrinfo(*args, **kwargs):
@@ -518,29 +518,31 @@ Rules:
 
 7. STRUCTURED RESPONSE RULE
 
-You MUST respond in JSON format.
-Your output must match the following JSON Schema:
+You MUST always respond in JSON format with this exact schema:
 {{
   "answer": "Your detailed conversational answer in the selected language",
-  "entities": [
-    {{
-      "type": "event | exam | assignment | fee | project_submission",
-      "name": "Name of the event / exam / assignment / deadline",
-      "date": "Date-time string, prefer ISO format YYYY-MM-DDTHH:MM:SS+05:30. Defaults to 10:00 AM if time not specified.",
-      "confidence": 0.0 to 1.0 representing how certain the date is,
-      "timezone": "Asia/Kolkata"
-    }}
-  ],
-  "actions": [
-    {{
-      "type": "set_reminder",
-      "entity": "Name of the event (matching name in entities)"
-    }}
-  ]
+  "entities": [],
+  "actions": []
 }}
 
-Only extract entities and actions if the user query or answer references a specific date-based event, exam, assignment, or deadline that is a candidate for setting a reminder. Otherwise, leave the entities and actions arrays empty.
+CRITICAL: The "answer" field must ALWAYS contain a full, helpful response using the provided context.
+- NEVER leave "answer" empty or say "not found" just because entities is empty
+- entities and actions being empty does NOT affect the quality of your answer
+- Answer the question completely FIRST, then decide if entities apply
 
+Populate entities and actions ONLY when ALL three are true:
+  1. User states a specific date explicitly
+  2. User explicitly requests a reminder
+  3. Subject is a time-based academic event
+
+Otherwise set entities: [] and actions: [] but STILL give a complete answer.
+
+EXAMPLES:
+  User: "how to get new id card?" 
+  → Full answer about ID card process, entities: [], actions: []
+  
+  User: "I have chemistry exam on June 15, set a reminder"
+  → Acknowledge + populate entities and actions
 """
 
     
@@ -738,82 +740,82 @@ class FeedbackRequest(BaseModel):
     feedback: str
 
 
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
 
+
     await ensure_chat(req.chatId, req.userId, req.text)
+
 
    
     await messages_collection.insert_one({
         "chatId": req.chatId,
-        "userId": req.userId,   
+        "userId": req.userId,  
         "role": "user",
         "content": req.text,
         "createdAt": datetime.utcnow()
     })
 
+
     answer = "Unknown error"
+    
     raw_entities = []
     raw_actions = []
+    conversational_answer = "Unknown error"  # ← add this
+    entities = []                             # ← add this  
+    actions = [] 
+
 
     try:
+        
+        
         memory = await load_memory(req.chatId, req.userId)
-
-        # ── Step 1: route ────────────────────────────────────
+         # ── Step 1: route ────────────────────────────────────
+        routing = await route_query(req.text)
+      # ── Step 1: route ────────────────────────────────────
         routing = await route_query(req.text)
         sources = routing.get("sources", ["qdrant"])
         print(f"[router] {sources} <- {routing.get('reason')}")
 
-        if not sources:
-            result = await question_answer_chain.ainvoke({
-                "input": req.text,
-                "chat_history": memory.chat_memory.messages,
-                "context": [],
-                "language": req.language
-            })
-            if isinstance(result, dict):
-                answer = result.get("answer", "No answer returned")
-            else:
-                answer = str(result)
-        else:
-            # ── Step 2: parallel fetch ────────────────────────────
-            tasks = []
-            if "mongodb" in sources:
-                tasks.append(fetch_mongo_docs(req.text))
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                mongo_docs = results[0] if not isinstance(results[0], Exception) else []
-            else:
-                mongo_docs = []
+        from zoneinfo import ZoneInfo
+        now_str = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S %Z")
 
-            # ── Step 3: format extra context ─────────────────────
-            extra_context = ""
-            if mongo_docs:
-                parts = [f"[MONGODB]\n{d.page_content}" for d in mongo_docs]
-                extra_context = "\n\n".join(parts)
+        # ── Step 2: parallel fetch ────────────────────────────
+        tasks = []
+        if "mongodb" in sources:
+            tasks.append(fetch_mongo_docs(req.text))
 
-            # ── Step 4: invoke rag_chain ─────────────────────────
-            # if only mongodb → skip qdrant by passing empty input trick
+        mongo_docs = []
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            mongo_docs = results[0] if not isinstance(results[0], Exception) else []
+
+        extra_context = ""
+        if mongo_docs:
+            parts = [f"[MONGODB]\n{d.page_content}" for d in mongo_docs]
+            extra_context = "\n\n".join(parts)
+
+        # ── Step 3: build invoke input & call ─────────────────
+        if "qdrant" in sources or "mongodb" in sources:
             invoke_input = req.text
-            if "qdrant" not in sources:
-                invoke_input = f"CONTEXT ONLY FROM DB:\n{extra_context}\n\nQuestion: {req.text}"
-                extra_context = ""  # already embedded above
+            if "reminder" in sources:
+                invoke_input = f"[Current date: {now_str}]\n{invoke_input}"
+            if "qdrant" not in sources and extra_context:
+                invoke_input = f"CONTEXT ONLY FROM DB:\n{extra_context}\n\nQuestion: {invoke_input}"
+                extra_context = ""
 
             result = await rag_chain.ainvoke({
                 "input": invoke_input,
                 "chat_history": memory.chat_memory.messages,
                 "language": req.language,
-                # extra_context injected via system prompt below if present
             })
-
-            # ── Step 5: prepend mongo context to answer if both ──
             answer = result.get("answer", "No answer returned")
-            if extra_context and "qdrant" in sources:
-                # re-invoke with merged context
-                merged_input = f"""Additional records from database:
-{extra_context}
 
-Original question: {req.text}"""
+            if extra_context and "qdrant" in sources:
+                merged_input = f"Additional records from database:\n{extra_context}\n\nOriginal question: {req.text}"
+                if "reminder" in sources:
+                    merged_input = f"[Current date: {now_str}]\n{merged_input}"
                 result2 = await rag_chain.ainvoke({
                     "input": merged_input,
                     "chat_history": memory.chat_memory.messages,
@@ -821,21 +823,59 @@ Original question: {req.text}"""
                 })
                 answer = result2.get("answer", answer)
 
+        elif "reminder" in sources:
+            # Pure reminder — bypass RAG entirely
+            reminder_result = await llm.ainvoke([
+                {
+                    "role": "system",
+                    "content": f"""You are a helpful assistant. Current date and time: {now_str}
 
+The user wants to set a personal reminder. Extract the event details and respond ONLY in this JSON format:
+{{
+  "answer": "A friendly confirmation acknowledging their reminder",
+  "entities": [
+    {{
+      "type": "exam | assignment | fee | project_submission | event",
+      "name": "Name of the event",
+      "date": "YYYY-MM-DDTHH:MM:SS+05:30",
+      "confidence": 0.95,
+      "timezone": "Asia/Kolkata"
+    }}
+  ],
+  "actions": [
+    {{
+      "type": "set_reminder",
+      "entity": "Name matching entity above"
+    }}
+  ]
+}}"""
+                },
+                {"role": "user", "content": req.text}
+            ])
+            answer = reminder_result.content.strip()
+            if "</think>" in answer:
+                answer = answer.split("</think>")[-1].strip()
 
+        else:
+            # fallback — should rarely hit
+            result = await rag_chain.ainvoke({
+                "input": req.text,
+                "chat_history": memory.chat_memory.messages,
+                "language": req.language,
+            })
+            answer = result.get("answer", "No answer returned")
 
-        # Parse LLM response for entities/actions (JSON extraction & fallback)
+        # ── Parse LLM response for entities/actions ───────────
         print("====== REMINDER PIPELINE DEBUGGING ======")
         print(f"RAW LLM RESPONSE:\n{answer}")
-        
+
         parsed_data = parse_llm_response(answer)
         conversational_answer = parsed_data["answer"]
         raw_entities = parsed_data["entities"]
         raw_actions = parsed_data["actions"]
-        
+
         print(f"PARSED ENTITIES (PRE-FILTER): {raw_entities}")
         print(f"PARSED ACTIONS (PRE-FILTER): {raw_actions}")
-
         # Deterministic Event Category & Date Validation
         from reminder_service import parse_iso_datetime, get_now_tz, normalize_event_name
         
@@ -902,36 +942,44 @@ Original question: {req.text}"""
             except Exception as exc:
                 print("Error validating entity:", exc)
                 continue
-
         # Safeguard: if any entity is found, sanitize misleading language
         if entities:
             conversational_answer = sanitize_misleading_wording(conversational_answer)
 
+
         #  update memory
         memory.chat_memory.add_user_message(req.text)
         memory.chat_memory.add_ai_message(conversational_answer)
+       
+       # memory.chat_memory.add_ai_message(answer)
+
 
         await save_memory_summary(req.chatId, req.userId, memory)
+
+
     except Exception as e:
         print("Chat error:", e)
+        answer = f"Error: {str(e)}"
         conversational_answer = f"Error: {str(e)}"
         entities = []
         actions = []
 
+
     # store assistant reply
     await messages_collection.insert_one({
-        "chatId": req.chatId,
+   "chatId": req.chatId,
         "userId": req.userId,  
         "role": "assistant",
         "content": conversational_answer,
         "entities": entities,
         "actions": actions,
-        "createdAt": datetime.utcnow()  
-    })
+        "createdAt": datetime.utcnow()    
+})
+
 
     # update timestamp
     await chats_collection.update_one(
-        {
+   {
             "_id": req.chatId,
             "userId": req.userId   
         },
@@ -939,12 +987,15 @@ Original question: {req.text}"""
             "$set": {"updatedAt": datetime.utcnow()}
         }
     )
+
+    print("\nUSER:", req.text)
+    print("\nANSWER:", answer)
     return {
         "answer": conversational_answer,
         "entities": entities,
         "actions": actions,
         "debug_raw_entities": raw_entities
-    }
+        }
 
 @app.post("/api/transcribe")
 async def transcribe_audio(file: UploadFile = File(...),language: str = Form("en")):
