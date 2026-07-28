@@ -15,7 +15,11 @@ Decide which data source(s) to query based on the user question.
 Sources available:
 - "qdrant"   : regulations, fees, clubs, academic policies (vector DB)
 - "mongodb"  : contact details - counsellor, faculty, departments, committee (MongoDB)
-- "reminder" : user mentions a personal event/exam/deadline WITH a specific date AND wants to be reminded
+- "reminder" : user wants to be reminded about an OFFICIAL college event or
+               announcement (exam, registration, placement drive, symposium,
+               hackathon, convocation, fee deadline, circular, result, ...)
+               Personal to-dos (alarms, gym, chores, calling someone) are NOT
+               reminders — route those to ["qdrant"], VBOT will decline them.
 
 Return ONLY valid JSON, no other text:
 {"sources": ["qdrant"], "reason": "one sentence"}
@@ -32,10 +36,16 @@ Rules:
 
 REMINDER EXAMPLES:
 - "i have chemistry exam on 18th june, set a reminder" → ["reminder"]
+- "remind me about the placement drive tomorrow" → ["reminder"]
 - "when is the fee deadline and remind me on july 1" → ["qdrant", "reminder"]
 - "who is my counsellor and remind me to meet them on friday" → ["mongodb", "reminder"]
 - "how to get id card?" → ["qdrant"]
 - "what are the exam rules?" → ["qdrant"]
+
+PERSONAL TASK EXAMPLES (never "reminder"):
+- "remind me to drink water" → ["qdrant"]
+- "remind me to call mom at 8" → ["qdrant"]
+- "wake me at 6 am" → ["qdrant"]
 """
 
 async def route_query(query: str) -> dict:

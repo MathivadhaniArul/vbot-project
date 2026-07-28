@@ -61,6 +61,8 @@ import { Languages } from "lucide-react"
 
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
+// Fallback cadence for the unread badge when the realtime stream is unavailable.
+const NOTIFICATION_POLL_INTERVAL_MS = 30000;
 const suggestions = [
   "when absolute grading is adopted ?",
   "what is the FAT re-evaluation procedure?",
@@ -79,6 +81,8 @@ export default function ChatBotDemo() {
   const [language, setLanguage] = useState("en");
   const [notifCount, setNotifCount] = useState(0);
   const [notifPanelOpen, setNotifPanelOpen] = useState(false);
+  // Bumped on every pushed notification so the panel refetches immediately.
+  const [notifSignal, setNotifSignal] = useState(0);
 
   // Fetch unread count helper
   const fetchUnreadCount = useCallback(async () => {
@@ -96,13 +100,36 @@ export default function ChatBotDemo() {
     }
   }, [userId]);
 
-  // Initial fetch on mount / user change
+  // Initial fetch on mount / user change, plus polling as the fallback path.
   useEffect(() => {
     if (userId) {
       fetchUnreadCount();
-      const interval = setInterval(fetchUnreadCount, 30000);
+      const interval = setInterval(fetchUnreadCount, NOTIFICATION_POLL_INTERVAL_MS);
       return () => clearInterval(interval);
     }
+  }, [userId, fetchUnreadCount]);
+
+  // Realtime delivery: a reminder firing on the server pushes an SSE event, so
+  // the bell and the panel update without a refresh. EventSource reconnects on
+  // its own; if the stream is unavailable the polling above still covers us.
+  useEffect(() => {
+    if (!userId) return;
+    const source = new EventSource(
+      `${API_BASE}/api/notifications/stream?userId=${encodeURIComponent(userId)}`
+    );
+
+    const onNotification = () => {
+      fetchUnreadCount();
+      setNotifSignal(n => n + 1);
+    };
+    source.addEventListener('notification', onNotification);
+    source.addEventListener('ready', onNotification);
+
+    return () => {
+      source.removeEventListener('notification', onNotification);
+      source.removeEventListener('ready', onNotification);
+      source.close();
+    };
   }, [userId, fetchUnreadCount]);
 
   const { messages, setMessages, status } = useChat();
@@ -675,6 +702,7 @@ const startVAD = (stream: MediaStream) => {
         isOpen={notifPanelOpen}
         onClose={() => setNotifPanelOpen(false)}
         onUnreadCountChange={setNotifCount}
+        refreshSignal={notifSignal}
       />
     </main>
   );

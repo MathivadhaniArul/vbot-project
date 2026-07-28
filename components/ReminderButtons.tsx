@@ -26,6 +26,18 @@ interface ReminderButtonsProps {
   onSuccess?: (msg: string) => void;
 }
 
+// FastAPI's `detail` is a string for HTTPException but an array of issues for a
+// validation error; rendering the raw value yields "[object Object]".
+function describeError(detail: unknown, fallback: string): string {
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    const msg = (detail as { msg?: string }[])
+      .map(d => d?.msg).filter(Boolean).join('; ');
+    if (msg) return msg;
+  }
+  return fallback;
+}
+
 export default function ReminderButtons({ userId, entity, chatId, onSuccess }: ReminderButtonsProps) {
   const [step, setStep] = useState<number>(0);
   const [loading, setLoading] = useState<boolean>(false);
@@ -41,6 +53,7 @@ export default function ReminderButtons({ userId, entity, chatId, onSuccess }: R
   const [error, setError] = useState<string>('');
   const [successMsg, setSuccessMsg] = useState<string>('');
   const [isDuplicate, setIsDuplicate] = useState<boolean>(false);
+  const [rejected, setRejected] = useState<boolean>(false);
 
   // Load preferences
   const fetchPreferences = async () => {
@@ -154,7 +167,9 @@ export default function ReminderButtons({ userId, entity, chatId, onSuccess }: R
         })
       });
       const data = await res.json();
-      if (!data.success) throw new Error(data.detail || "Failed to save preferences");
+      if (!res.ok || !data.success) {
+        throw new Error(describeError(data.detail, 'Failed to save preferences'));
+      }
       
       setPref(data.preferences);
       
@@ -226,8 +241,16 @@ export default function ReminderButtons({ userId, entity, chatId, onSuccess }: R
         })
       });
       const data = await res.json();
-      if (!data.success) throw new Error(data.detail || "Failed to create reminder");
-      
+      if (res.status === 422 && typeof data.detail === 'string') {
+        // Policy refusal: the subject is not official college information.
+        setRejected(true);
+        setError(data.detail);
+        return;
+      }
+      if (!res.ok || !data.success) {
+        throw new Error(describeError(data.detail, 'Failed to create reminder'));
+      }
+
       setIsDuplicate(data.is_duplicate || false);
       setSuccessMsg(`Reminder set for: ${entity.name}`);
       setStep(5);
@@ -244,6 +267,16 @@ export default function ReminderButtons({ userId, entity, chatId, onSuccess }: R
   // Skip showing reminder button if show_reminder is false
   if (!entity.show_reminder) {
     return null;
+  }
+
+  // Server-side policy refused this subject — explain rather than retry.
+  if (rejected) {
+    return (
+      <div className="animate-fadeIn my-3 p-4 rounded-xl border border-amber-500/30 bg-amber-500/5 max-w-lg text-sm flex gap-2 items-start">
+        <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
+        <p className="text-xs text-muted-foreground leading-relaxed">{error}</p>
+      </div>
+    );
   }
 
   return (
@@ -318,9 +351,16 @@ export default function ReminderButtons({ userId, entity, chatId, onSuccess }: R
             })}
           </div>
 
+          {error && (
+            <p className="text-xs text-red-500 flex items-center gap-1">
+              <AlertCircle className="w-3.5 h-3.5" />
+              {error}
+            </p>
+          )}
+
           <div className="flex justify-end gap-2 mt-2">
-            <Button size="sm" variant="ghost" onClick={() => setStep(0)}>Back</Button>
-            <Button size="sm" onClick={async () => {
+            <Button size="sm" variant="ghost" onClick={() => setStep(0)} disabled={loading}>Back</Button>
+            <Button size="sm" disabled={loading} onClick={async () => {
               if ((notifType === 'email' || notifType === 'all') && !email.trim()) {
                 setStep(2);
               } else if (notifType === 'google_calendar' && !googleConnected) {
@@ -328,7 +368,7 @@ export default function ReminderButtons({ userId, entity, chatId, onSuccess }: R
               } else {
                 await handleSavePrefAndContinue();
               }
-            }}>Next</Button>
+            }}>{loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Next'}</Button>
           </div>
         </div>
       )}

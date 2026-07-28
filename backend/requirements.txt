@@ -224,6 +224,11 @@ zipp==3.23.0
 # httpx
 # orjson
 
+# Background job scheduling — required by the reminder delivery loop
+# (reminder_scheduler.py) and the scrape pipeline (pipeline/scheduler.py).
+APScheduler>=3.10.0
+
+# Optional integrations: reminders fall back to in-app notifications without them.
 google-auth-oauthlib>=1.2.0
 google-api-python-client>=2.100.0
 aiosmtplib>=3.0.0

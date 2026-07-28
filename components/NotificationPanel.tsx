@@ -1,20 +1,20 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/models/utils';
-import { 
-  Bell, 
-  X, 
-  Check, 
-  Clock, 
-  Trash2, 
-  AlertCircle, 
-  Loader2, 
-  Calendar, 
+import {
+  Bell,
+  X,
+  Check,
+  Clock,
+  Trash2,
+  Loader2,
+  Calendar,
   Info,
-  CalendarCheck
+  CalendarCheck,
+  History
 } from 'lucide-react';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
@@ -29,36 +29,64 @@ interface Notification {
   created_at: string;
 }
 
-interface UpcomingReminder {
+interface ReminderRecord {
   id: string;
   event_name: string;
   event_date: string;
   source_type: string;
+  official_category?: string | null;
+  notification_type?: string;
   reminder_offset: string;
-  days_remaining: number;
+  days_remaining?: number;
   status: string;
 }
+
+type PanelTab = 'notifications' | 'upcoming' | 'history';
+
+// Keep in sync with reminder_service.HISTORY_STATUSES.
+const HISTORY_STATUS_LABELS: Record<string, string> = {
+  expired: 'Expired',
+  completed: 'Completed',
+  cancelled: 'Cancelled',
+  failed: 'Failed',
+};
+
+const POLL_INTERVAL_MS = 30000;
 
 interface NotificationPanelProps {
   userId: string;
   isOpen: boolean;
   onClose: () => void;
   onUnreadCountChange?: (count: number) => void;
+  /** Bumped by the page's realtime stream to force an immediate refresh. */
+  refreshSignal?: number;
 }
 
-export default function NotificationPanel({ userId, isOpen, onClose, onUnreadCountChange }: NotificationPanelProps) {
-  const [activeTab, setActiveTab] = useState<'notifications' | 'upcoming'>('notifications');
+export default function NotificationPanel({ userId, isOpen, onClose, onUnreadCountChange, refreshSignal }: NotificationPanelProps) {
+  const [activeTab, setActiveTab] = useState<PanelTab>('notifications');
   const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [reminders, setReminders] = useState<UpcomingReminder[]>([]);
+  const [reminders, setReminders] = useState<ReminderRecord[]>([]);
+  const [history, setHistory] = useState<ReminderRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [actioningId, setActioningId] = useState<string | null>(null);
 
-  const fetchData = async () => {
+  // Defence in depth: the backend already excludes past events from the active
+  // list, but a reminder can lapse while the panel sits open between polls.
+  const isStillUpcoming = (r: ReminderRecord) => {
+    const eventTime = new Date(r.event_date).getTime();
+    return Number.isNaN(eventTime) || eventTime > Date.now();
+  };
+
+  const fetchData = useCallback(async () => {
     if (!userId) return;
     setLoading(true);
     try {
-      // Fetch Notifications
-      const notifRes = await fetch(`${API_BASE}/api/notifications?userId=${userId}`);
+      const [notifRes, remRes, histRes] = await Promise.all([
+        fetch(`${API_BASE}/api/notifications?userId=${userId}`),
+        fetch(`${API_BASE}/api/reminders/upcoming?userId=${userId}`),
+        fetch(`${API_BASE}/api/reminders/history?userId=${userId}`),
+      ]);
+
       const notifData = await notifRes.json();
       if (notifData.success) {
         setNotifications(notifData.notifications);
@@ -66,35 +94,42 @@ export default function NotificationPanel({ userId, isOpen, onClose, onUnreadCou
         if (onUnreadCountChange) onUnreadCountChange(unread);
       }
 
-      // Fetch Upcoming Reminders
-      const remRes = await fetch(`${API_BASE}/api/reminders/upcoming?userId=${userId}`);
       const remData = await remRes.json();
       if (remData.success) {
-        setReminders(remData.reminders);
+        setReminders(remData.reminders.filter(isStillUpcoming));
+      }
+
+      const histData = await histRes.json();
+      if (histData.success) {
+        setHistory(histData.reminders);
       }
     } catch (err) {
       console.error("Failed to load notifications/reminders:", err);
     } finally {
       setLoading(false);
     }
-  };
+  }, [userId, onUnreadCountChange]);
 
   useEffect(() => {
     if (isOpen) {
       fetchData();
     }
-  }, [isOpen, userId]);
+  }, [isOpen, userId, fetchData]);
 
-  // Refetch data every 30 seconds if open to keep status updated
+  // Realtime push: the page's SSE stream bumps refreshSignal on every new
+  // notification, so the panel updates without waiting for the next poll.
   useEffect(() => {
-    let interval: any;
-    if (isOpen) {
-      interval = setInterval(fetchData, 30000);
+    if (isOpen && refreshSignal) {
+      fetchData();
     }
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [isOpen]);
+  }, [refreshSignal, isOpen, fetchData]);
+
+  // Polling fallback — also re-evaluates which reminders have lapsed.
+  useEffect(() => {
+    if (!isOpen) return;
+    const interval = setInterval(fetchData, POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [isOpen, fetchData]);
 
   const handleMarkRead = async (id: string) => {
     setActioningId(id);
@@ -127,13 +162,10 @@ export default function NotificationPanel({ userId, isOpen, onClose, onUnreadCou
       if (res.ok) {
         // Notification is marked read automatically by backend when snoozed
         setNotifications(prev => prev.filter(n => n.id !== id));
-        // Refresh upcoming reminders since its trigger time moved
-        const remRes = await fetch(`${API_BASE}/api/reminders/upcoming?userId=${userId}`);
-        const remData = await remRes.json();
-        if (remData.success) setReminders(remData.reminders);
-        
         const unread = notifications.filter(n => n.id !== id && !n.read).length;
         if (onUnreadCountChange) onUnreadCountChange(unread);
+        // The reminder's trigger time moved — reload every list.
+        await fetchData();
       }
     } catch (err) {
       console.error(err);
@@ -154,6 +186,8 @@ export default function NotificationPanel({ userId, isOpen, onClose, onUnreadCou
       });
       if (res.ok) {
         setReminders(prev => prev.filter(r => r.id !== id));
+        // A cancelled reminder belongs in History now.
+        await fetchData();
       }
     } catch (err) {
       console.error(err);
@@ -216,28 +250,24 @@ export default function NotificationPanel({ userId, isOpen, onClose, onUnreadCou
 
         {/* Navigation Tabs */}
         <div className="flex border-b border-border/30 px-2 py-1 gap-1">
-          <button
-            onClick={() => setActiveTab('notifications')}
-            className={cn(
-              "flex-1 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer",
-              activeTab === 'notifications' 
-                ? "bg-muted text-foreground" 
-                : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            Notifications ({unreadNotifications.length})
-          </button>
-          <button
-            onClick={() => setActiveTab('upcoming')}
-            className={cn(
-              "flex-1 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer",
-              activeTab === 'upcoming' 
-                ? "bg-muted text-foreground" 
-                : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            Scheduled ({reminders.length})
-          </button>
+          {([
+            { id: 'notifications', label: 'Alerts', count: unreadNotifications.length },
+            { id: 'upcoming', label: 'Scheduled', count: reminders.length },
+            { id: 'history', label: 'History', count: history.length },
+          ] as { id: PanelTab; label: string; count: number }[]).map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={cn(
+                "flex-1 py-2 text-xs font-medium rounded-lg transition-colors cursor-pointer",
+                activeTab === tab.id
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              {tab.label} ({tab.count})
+            </button>
+          ))}
         </div>
 
         {/* Content Area */}
@@ -300,7 +330,7 @@ export default function NotificationPanel({ userId, isOpen, onClose, onUnreadCou
                 ))}
               </div>
             )
-          ) : (
+          ) : activeTab === 'upcoming' ? (
             /* Upcoming Reminders Tab */
             reminders.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-20 text-muted-foreground gap-2">
@@ -319,15 +349,15 @@ export default function NotificationPanel({ userId, isOpen, onClose, onUnreadCou
                         <p className="font-semibold text-foreground truncate max-w-[200px]">{rem.event_name}</p>
                         <span className={cn(
                           "px-1.5 py-0.5 rounded-sm text-[9px] font-semibold uppercase tracking-wider",
-                          rem.days_remaining <= 1 
-                            ? "bg-red-500/10 text-red-500 animate-pulse" 
+                          (rem.days_remaining ?? 0) <= 1
+                            ? "bg-red-500/10 text-red-500 animate-pulse"
                             : "bg-blue-500/10 text-blue-500"
                         )}>
                           {rem.days_remaining === 0 ? 'Today' : rem.days_remaining === 1 ? '1 day left' : `${rem.days_remaining} days left`}
                         </span>
                       </div>
                       <p className="text-[10px] text-muted-foreground capitalize mt-1">
-                        Category: {rem.source_type} • Offset: {rem.reminder_offset}
+                        Category: {(rem.official_category || rem.source_type).replace(/_/g, ' ')} • Offset: {rem.reminder_offset}
                       </p>
                       <p className="text-muted-foreground mt-2 flex items-center gap-1">
                         <Calendar className="w-3.5 h-3.5" />
@@ -351,6 +381,44 @@ export default function NotificationPanel({ userId, isOpen, onClose, onUnreadCou
                         )}
                       </Button>
                     </div>
+                  </div>
+                ))}
+              </div>
+            )
+          ) : (
+            /* History Tab — reminders that expired, completed, failed or were cancelled */
+            history.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-20 text-muted-foreground gap-2">
+                <History className="w-8 h-8 opacity-40" />
+                <p className="text-xs">No past reminders yet</p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {history.map((rem) => (
+                  <div
+                    key={rem.id}
+                    className="p-3 rounded-xl border border-border/20 bg-muted/10 text-xs opacity-75"
+                  >
+                    <div className="flex justify-between items-start gap-2">
+                      <p className="font-semibold text-foreground truncate max-w-[200px]">{rem.event_name}</p>
+                      <span className={cn(
+                        "px-1.5 py-0.5 rounded-sm text-[9px] font-semibold uppercase tracking-wider flex-shrink-0",
+                        rem.status === 'completed'
+                          ? "bg-green-500/10 text-green-600"
+                          : rem.status === 'failed'
+                            ? "bg-red-500/10 text-red-500"
+                            : "bg-muted text-muted-foreground"
+                      )}>
+                        {HISTORY_STATUS_LABELS[rem.status] || rem.status}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground capitalize mt-1">
+                      Category: {(rem.official_category || rem.source_type).replace(/_/g, ' ')}
+                    </p>
+                    <p className="text-muted-foreground mt-2 flex items-center gap-1">
+                      <Calendar className="w-3.5 h-3.5" />
+                      {formatDate(rem.event_date)}
+                    </p>
                   </div>
                 ))}
               </div>

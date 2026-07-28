@@ -66,6 +66,8 @@ logging.getLogger("chromadb").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
+logger = logging.getLogger("main")
+
 # Add ffmpeg to PATH
 os.environ["PATH"] += os.pathsep + str(Path(__file__).resolve().parent / "ffmpeg_bin")
 
@@ -686,6 +688,18 @@ User: what about others
     except Exception as e:
         print(f"⚠️ Index creation skipped: {e}")
 
+    # ── Start Reminder Scheduler ──────────────────────────────────────
+    # Deliberately independent of the scrape pipeline above: reminder delivery
+    # must keep working even when the scraping stack fails to start.
+    try:
+        from reminder_scheduler import start_reminder_scheduler, get_check_interval_seconds
+        start_reminder_scheduler()
+        print(f" Reminder scheduler started (every {get_check_interval_seconds()}s).")
+    except Exception as e:
+        logger.error(f"Reminder scheduler failed to start: {e}", exc_info=True)
+        print(f"⚠️ Reminder scheduler failed to start: {e}")
+        print("  (Reminders will NOT be delivered until this is fixed)")
+
 
 def parse_llm_response(raw_text: str) -> dict:
     raw_text = raw_text.strip()
@@ -771,9 +785,7 @@ async def chat(req: ChatRequest):
         
         
         memory = await load_memory(req.chatId, req.userId)
-         # ── Step 1: route ────────────────────────────────────
-        routing = await route_query(req.text)
-      # ── Step 1: route ────────────────────────────────────
+        # ── Step 1: route ────────────────────────────────────
         routing = await route_query(req.text)
         sources = routing.get("sources", ["qdrant"])
         print(f"[router] {sources} <- {routing.get('reason')}")
@@ -825,18 +837,28 @@ async def chat(req: ChatRequest):
 
         elif "reminder" in sources:
             # Pure reminder — bypass RAG entirely
+            from reminder_policy import OFFICIAL_CATEGORIES, official_categories_summary
             reminder_result = await llm.ainvoke([
                 {
                     "role": "system",
-                    "content": f"""You are a helpful assistant. Current date and time: {now_str}
+                    "content": f"""You are VBOT, the VIT college assistant. Current date and time: {now_str}
 
-The user wants to set a personal reminder. Extract the event details and respond ONLY in this JSON format:
+VBOT only sets reminders for official college events and announcements:
+{official_categories_summary()}.
+Personal to-dos (alarms, drinking water, calling someone, gym, chores, personal
+study time) are NOT supported and must NOT produce an entity.
+
+If the request is about an official college event or announcement, extract its
+details. If it is a personal task, politely explain that you only handle official
+college events and announcements, and return empty entities and actions.
+
+Respond ONLY in this JSON format:
 {{
-  "answer": "A friendly confirmation acknowledging their reminder",
+  "answer": "A friendly confirmation, or a polite refusal for personal tasks",
   "entities": [
     {{
-      "type": "exam | assignment | fee | project_submission | event",
-      "name": "Name of the event",
+      "type": "{' | '.join(OFFICIAL_CATEGORIES)}",
+      "name": "Name of the official event or announcement",
       "date": "YYYY-MM-DDTHH:MM:SS+05:30",
       "confidence": 0.95,
       "timezone": "Asia/Kolkata"
@@ -878,23 +900,17 @@ The user wants to set a personal reminder. Extract the event details and respond
         print(f"PARSED ACTIONS (PRE-FILTER): {raw_actions}")
         # Deterministic Event Category & Date Validation
         from reminder_service import parse_iso_datetime, get_now_tz, normalize_event_name
-        
-        ACADEMIC_EVENT_TYPES = [
-            "exam",
-            "assignment",
-            "fee",
-            "project_submission",
-            "registration",
-            "placement",
-            "workshop",
-            "seminar",
-            "event"
-        ]
-        
+        from reminder_policy import (
+            classify_reminder_subject,
+            is_reminder_request,
+            rejection_message,
+        )
+
         now = get_now_tz("Asia/Kolkata")
         entities = []
         actions = []
-        
+        rejected_personal = False
+
         for entity in raw_entities:
             try:
                 # 1. Date Check: parse date and verify it is in the future
@@ -907,27 +923,37 @@ The user wants to set a personal reminder. Extract the event details and respond
                     print(f"Skipping entity: Date {dt} is not in the future (now: {now}).")
                     # Historical/past event, skip
                     continue
-                    
-                # 2. Type/Category Check: verify it is an academic event type
-                category = entity.get("type", "").lower().strip()
-                if category not in ACADEMIC_EVENT_TYPES:
-                    print(f"Skipping entity: Category '{category}' not in ACADEMIC_EVENT_TYPES.")
-                    # Not recognized type, skip
+
+                # 2. Official-source check: VBOT only reminds about official college
+                #    events and announcements, never personal to-dos.
+                classification = classify_reminder_subject(
+                    entity.get("name", ""),
+                    entity.get("type", ""),
+                    entity.get("source_id"),
+                )
+                if not classification.allowed:
+                    print(
+                        f"Skipping entity: not official college information "
+                        f"(reason={classification.reason}, matched={classification.matched!r}). Entity: {entity}"
+                    )
+                    rejected_personal = True
                     continue
-                
-                print(f"Entity passed all checks: {entity}")
-                
+
+                print(f"Entity passed all checks: {entity} (category={classification.category})")
+
                 # Standardize both properties in clean ISO string format
                 iso_date = dt.isoformat()
                 entity["date"] = iso_date
                 entity["event_name"] = entity.get("name", "")
                 entity["event_date"] = iso_date
                 entity["event_type"] = entity.get("type", "")
+                entity["official_category"] = classification.category
+                entity["official_source"] = classification.source
                 entity["show_reminder"] = True
-                
+
                 # Keep both old and new properties to maintain compatibility
                 entities.append(entity)
-                
+
                 # Keep matching set_reminder actions if any (using case-insensitive & space-insensitive matching)
                 for action in raw_actions:
                     if action.get("type") == "set_reminder":
@@ -938,13 +964,26 @@ The user wants to set a personal reminder. Extract the event details and respond
                             actions.append(action)
                         else:
                             print(f"Action name mismatch: '{action_entity}' vs '{entity_name}'")
-                        
+
             except Exception as exc:
                 print("Error validating entity:", exc)
                 continue
         # Safeguard: if any entity is found, sanitize misleading language
         if entities:
             conversational_answer = sanitize_misleading_wording(conversational_answer)
+        elif rejected_personal or (
+            # No entity survived, but the user plainly asked for a reminder and the
+            # subject is not official. Checked against the user's own words so the
+            # refusal does not depend on the router or on the model bothering to
+            # emit an entity — left unchecked, the model happily replies
+            # "I've set your reminder!" for "remind me to drink water".
+            is_reminder_request(req.text)
+            and not classify_reminder_subject(req.text).allowed
+        ):
+            # Replace rather than append: a personal reminder request carries no
+            # other informational content worth preserving, and any fabricated
+            # confirmation in the model's answer must not survive.
+            conversational_answer = rejection_message()
 
 
         #  update memory
@@ -1257,20 +1296,28 @@ async def pipeline_history(url: str | None = None):
 
 @app.on_event("shutdown")
 def shutdown():
-    """Gracefully stop the pipeline scheduler."""
+    """Gracefully stop the background schedulers."""
     try:
         from pipeline.scheduler import stop_scheduler
         stop_scheduler()
+    except Exception:
+        pass
+    try:
+        from reminder_scheduler import stop_reminder_scheduler
+        stop_reminder_scheduler()
     except Exception:
         pass
 
 
 # ── Reminder API Endpoints ────────────────────────────────────────────
 from reminder_service import (
+    ReminderNotAllowedError,
     create_reminder,
     get_upcoming_reminders,
+    get_reminder_history,
     cancel_reminder,
     get_notifications,
+    get_unread_notification_count,
     mark_notification_read,
     snooze_reminder,
     get_user_preference,
@@ -1278,14 +1325,15 @@ from reminder_service import (
     connect_google_oauth,
     disconnect_google_oauth
 )
-from google_calendar import get_auth_url, create_calendar_event
 
 class ReminderCreateRequest(BaseModel):
     userId: str
     eventName: str
     eventDate: str
     sourceType: str
-    sourceId: str = None
+    # Optional[...] is required under Pydantic v2: a `str` field with a None
+    # default still rejects an explicit null, which is what the frontend sends.
+    sourceId: str | None = None
     notificationType: str = "in_app"
     reminderOffset: str = "1d"
     chatId: str = ""
@@ -1297,7 +1345,7 @@ class SnoozeRequest(BaseModel):
 class PreferenceSaveRequest(BaseModel):
     userId: str
     notificationType: str
-    email: str = None
+    email: str | None = None
 
 @app.post("/api/reminders")
 async def api_create_reminder(req: ReminderCreateRequest):
@@ -1314,6 +1362,10 @@ async def api_create_reminder(req: ReminderCreateRequest):
         )
         is_duplicate = reminder.get("is_duplicate", False) if isinstance(reminder, dict) else False
         return {"success": True, "reminder": reminder, "is_duplicate": is_duplicate}
+    except ReminderNotAllowedError as e:
+        # 422: understood but refused by policy — the subject is not official
+        # college information. The frontend renders `detail` verbatim.
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1324,6 +1376,21 @@ async def api_get_upcoming_reminders(userId: str):
         return {"success": True, "reminders": reminders}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/reminders/history")
+async def api_get_reminder_history(userId: str):
+    """Reminders that have expired, completed, failed or been cancelled."""
+    try:
+        reminders = await get_reminder_history(userId)
+        return {"success": True, "reminders": reminders}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/reminders/scheduler-status")
+async def api_reminder_scheduler_status():
+    """Health check for the reminder scheduler — is the delivery loop alive?"""
+    from reminder_scheduler import get_reminder_scheduler_status
+    return {"success": True, **get_reminder_scheduler_status()}
 
 @app.delete("/api/reminders/{id}")
 async def api_cancel_reminder(id: str, userId: str):
@@ -1340,6 +1407,44 @@ async def api_get_notifications(userId: str):
         return {"success": True, "notifications": notifications}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/notifications/stream")
+async def api_notifications_stream(userId: str):
+    """
+    Server-Sent Events stream pushing reminder notifications the instant they are
+    created, so the panel updates without a refresh.
+
+    The client keeps polling /api/notifications as a fallback, so a proxy that
+    buffers or drops this stream costs latency only, never a lost notification.
+    """
+    from fastapi.responses import StreamingResponse
+    from notification_hub import subscribe
+
+    heartbeat_seconds = 25  # below the common 30s idle-proxy timeout
+
+    async def event_source():
+        async with subscribe(userId) as queue:
+            unread = await get_unread_notification_count(userId)
+            yield f"event: ready\ndata: {json.dumps({'unread': unread})}\n\n"
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=heartbeat_seconds)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                except asyncio.CancelledError:
+                    break
+                yield f"event: notification\ndata: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable nginx response buffering
+        },
+    )
 
 @app.patch("/api/notifications/{id}/read")
 async def api_mark_notification_read(id: str, userId: str):
@@ -1384,6 +1489,9 @@ async def api_save_user_preferences(req: PreferenceSaveRequest):
 @app.get("/api/google/auth-url")
 async def api_google_auth_url(userId: str):
     try:
+        # Imported lazily so the optional Google Calendar dependencies never
+        # block the app (and the reminder pipeline) from starting.
+        from google_calendar import get_auth_url
         url = get_auth_url(userId)
         return {"success": bool(url), "url": url}
     except Exception as e:
@@ -1448,9 +1556,10 @@ async def api_google_test_event(userId: str):
             }
         
         from datetime import datetime, timedelta
+        from google_calendar import create_calendar_event
         now = datetime.utcnow()
         event_date = now + timedelta(hours=1)
-        
+
         event_id, refreshed_tokens = create_calendar_event(
             user_id=userId,
             google_oauth=google_oauth,
