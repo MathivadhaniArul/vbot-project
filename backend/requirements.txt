@@ -1,0 +1,97 @@
+# Add these to your existing backend requirements.
+celery[redis]>=5.4,<6
+redis>=5.0,<7
+pymongo>=4.8,<5
+google-api-python-client>=2.150,<3
+google-auth>=2.35,<3
+google-auth-oauthlib>=1.2,<2
+google-auth-httplib2>=0.2,<1
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+python-multipart==0.0.9
+pydantic==2.6.4
+python-dotenv==1.0.1
+
+# =========================
+# DATABASE
+# =========================
+motor==3.3.2
+pymongo==4.6.1
+
+# =========================
+# LANGCHAIN STACK
+# =========================
+langchain==0.2.11
+langchain-core==0.2.43
+langchain-community==0.2.10
+langchain-huggingface==0.0.3
+langchain-ollama==0.1.3
+langchain-text-splitters==0.2.4
+langsmith==0.1.147
+
+# =========================
+# VECTOR DB
+# =========================
+chromadb==0.5.5
+sentence-transformers==3.0.1
+
+# =========================
+# ML / AI
+# =========================
+torch
+torchvision
+torchaudio
+transformers
+huggingface_hub
+tokenizers
+tiktoken
+einops
+numpy==1.26.4
+scikit-learn
+scipy
+safetensors
+
+# Whisper (ASR)
+#openai-whisper==20231117
+
+git+https://github.com/openai/whisper.git
+
+# =========================
+# TTS
+# =========================
+edge-tts
+
+# =========================
+# SCRAPING / AUTOMATION
+# =========================
+selenium==4.44.0
+webdriver-manager==4.1.1
+beautifulsoup4
+requests
+trafilatura
+
+# =========================
+# UTILITIES
+# =========================
+tqdm==4.66.2
+flashrank==0.2.8
+pillow  
+lxml
+lxml_html_clean
+regex
+tenacity
+
+# =========================
+# SYSTEM / SUPPORT
+# =========================
+anyio
+httpx
+orjson
+
+
+# =========================
+# LANGGRAPH
+# =========================
+langgraph==0.2.6
+langgraph-checkpoint==1.0.0
+langgraph-sdk==0.1.0
