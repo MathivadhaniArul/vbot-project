@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    environment:
+      # Ollama's OpenAI-compatible endpoint. Assumes Ollama is running on
+      # the host machine (e.g. you already ran `ollama run qwen3:8b-q4_K_M`).
+      - VLLM_URL=http://host.docker.internal:11435/v1/chat/completions
+      - MODEL_NAME=qwen3:8b-q4_K_M
+    extra_hosts:
+      # Lets the container resolve "host.docker.internal" to the host's IP
+      # on Linux. Docker Desktop (Mac/Windows) already provides this.
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8080:8080"

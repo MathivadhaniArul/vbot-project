@@ -1,160 +1,80 @@
-# AI Chatbot (RAG-based)
+# Lingua Bridge — local GPU deployment (Ollama)
 
-A full-stack AI chatbot that answers questions using Retrieval-Augmented Generation (RAG).
-Built with a modern stack combining Next.js frontend and FastAPI backend.
+Two-way translating chat, served off your own GPU via Ollama's
+`qwen3:8b-q4_K_M`. Ollama serves the model, FastAPI bridges the two chat
+sides over WebSocket and calls Ollama's OpenAI-compatible endpoint for
+each translation, and a static frontend renders the chat.
 
----
+## 0. Prerequisites
 
-## Tech Stack
+- Ollama installed and the model already pulled/running:
+  ```bash
+  ollama run qwen3:8b-q4_K_M
+  ```
+  (You can exit the interactive prompt with `/bye` — the model server
+  keeps running in the background on port 11434.)
+- Docker installed on the same machine.
 
-### Frontend
-
-* Next.js (App Router)
-* TypeScript
-* Tailwind CSS
-* shadcn/ui
-
-### Backend
-
-* FastAPI
-* LangChain
-* Ollama (LLM)
-* Chroma (Vector Database)
-* MongoDB (Chat storage)
-
----
-
-##  Features
-
-* Chat interface with persistent history
-* RAG-based answers from documents
-* Context-aware retrieval
-* Web scraping + document indexing
-* FastAPI backend with async support
-
----
-
-## Project Structure
-
-```
-ai-chatbot/
-│
-├── app/                # Next.js app router
-├── components/         # UI components (shadcn)
-├── backend/            # FastAPI + RAG pipeline
-│   ├── main.py
-│   ├── scrape/
-│   └── requirements.txt
-│
-├── public/
-├── package.json
-└── README.md
-```
-
----
-
-## Setup Instructions
-
-### Clone the repository
-
+Confirm Ollama is reachable and serving the OpenAI-compatible API:
 ```bash
-git clone https://github.com/YOUR_USERNAME/ai-chatbot.git
-cd ai-chatbot
+curl http://localhost:11434/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3:8b-q4_K_M",
+    "messages": [
+      {"role":"system","content":"Translate from English to French. Reply with ONLY the translation."},
+      {"role":"user","content":"How is your day going?"}
+    ]
+  }'
 ```
+If that returns a translated sentence, you're ready.
 
----
+## 1. Start the backend
 
-### Frontend setup
-
+From this project's root directory:
 ```bash
-npm install
-npm run dev
+docker compose up --build
 ```
 
-Runs on: http://localhost:3000
+The backend container reaches your host's Ollama through
+`host.docker.internal:11434` — no separate model-server container needed,
+since Ollama is already running the model for you.
 
----
+> Linux note: `extra_hosts: host.docker.internal:host-gateway` is already
+> set in docker-compose.yml so this resolves correctly. On Docker Desktop
+> (Mac/Windows) it works out of the box.
 
-### Backend setup
+## 2. Open the chat
 
-```bash
-cd backend
-pip install -r requirements.txt
-uvicorn main:app --reload
-```
+Visit `http://<gpu-machine-ip>:8080` in a browser. The page shows both
+Person A and Person B panes — pick a language for each side, and messages
+typed on one side appear translated on the other.
 
-Runs on: http://localhost:8000
+## 3. If the backend can't reach Ollama
 
----
+- Make sure Ollama is bound to all interfaces, not just localhost, if
+  Docker's bridge network can't reach it: set `OLLAMA_HOST=0.0.0.0` before
+  starting Ollama, or run `systemctl edit ollama` to add it permanently.
+- Re-run the curl check in step 0 from inside the backend container to
+  isolate whether it's a Docker networking issue or a model issue:
+  ```bash
+  docker compose exec backend curl http://host.docker.internal:11434/v1/chat/completions ...
+  ```
 
-## Environment Variables
+## 4. Notes on this model size
 
-Create a `.env` file inside `backend/`:
+`qwen3:8b-q4_K_M` is lighter than the 14B setup this project started
+with — expect faster responses and lower VRAM use, with a modest quality
+trade-off on nuanced or slang-heavy text. If translation quality matters
+more than speed for your use case, `qwen3:14b` or `qwen3:8b` at a higher
+quant (`q8_0`) are easy swaps — just `ollama pull` the new tag and update
+`MODEL_NAME` in docker-compose.yml.
 
-```env
-MONGO_URI=mongodb://localhost:27017
-OLLAMA_BASE_URL=http://127.0.0.1:11434
-```
+## 5. Next steps once this is working
 
----
-
-## How it works
-
-1. Documents are scraped and chunked
-2. Chunks are embedded using HuggingFace embeddings
-3. Stored in Chroma vector database
-4. User query → retrieved relevant context
-5. LLM (Ollama) generates answer based on context
-
-
-## Important Notes
-
-* `backend/chroma/` is ignored (vector DB is generated locally)
-* `.next/` and `node_modules/` are not included in repo
-* `.env` is not committed for security reasons
-
----
-
-## Usage Guide
-
-### Using the Frontend
-1. Open your browser and navigate to `http://localhost:3000`.
-2. **Text Chat:** Type your queries in the chat input at the bottom and press Enter to chat with the RAG-enabled assistant.
-3. **Voice Assistant:** 
-   * Click on the microphone icon to start recording your voice.
-   * Speak your query (the frontend uses **RecordRTC** to capture high-quality audio in WAV format).
-   * Click the stop button to send the voice query. The backend will transcribe it, query the RAG pipeline, and respond.
-
-### Using the Backend
-1. **Interactive API Docs:** Navigate to `http://localhost:8000/docs` in your browser to access the interactive FastAPI Swagger UI. Here you can explore and test all API endpoints manually (e.g., chat endpoints, ingestion endpoints).
-2. **Autonomous RAG Pipeline:** The backend runs a semi-automated RAG background pipeline. It automatically:
-   * Periodically crawls websites (such as the Riviera 2026 event site) using hybrid static/SPA fetchers.
-   * Detects changes using SHA-256 content hashes.
-   * Splits modified content into chunks and generates embeddings.
-   * Ingests the updated knowledge into the **Chroma DB** vector store.
-3. **Data Verification:** You can check the current status of the background jobs and verify database stats via the API endpoints.
-
----
-
-## Troubleshooting Notes
-
-* **Port Conflicts:** If ports `3000` or `8000` are already in use, you can specify different ports.
-  * For frontend: `npm run dev -- -p 3001`
-  * For backend: `uvicorn main:app --reload --port 8001`
-* **Vector DB Issues:** If Chroma DB is acting up or locked, delete the `backend/chroma/` directory and restart the backend to re-initialize it.
-* **ModuleNotFoundError:** Ensure your Python virtual environment is activated before installing dependencies and running the server.
-* **Missing Env Vars:** If you get errors related to MongoDB or Ollama, double-check that your `.env` file exists in the `backend/` directory and has the correct keys.
-
----
-
-## Collaboration
-
-1. Clone the repo (ensure you are using the existing collaborative repository).
-2. Install frontend and backend dependencies as detailed above.
-3. Add `.env` file to the backend.
-4. Run frontend & backend servers.
-5. Create a new branch for your feature, make sure not to commit secrets or cache files.
-
-## License
-
-This project is for educational purposes.
+- Swap the in-memory translation cache in `backend/main.py` for Redis if
+  you want it to survive backend restarts or scale to more replicas.
+- Add Postgres if you want persistent chat history.
+- Put Nginx or Caddy in front of port 8080 for TLS if this leaves your LAN.
+- Add a language auto-detect step (fastText langid) so people don't have
+  to pick their language manually each session.
